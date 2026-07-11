@@ -125,6 +125,24 @@ fn withdraw_releases_vested_in_steps() {
 }
 
 #[test]
+fn progress_reports_basis_points() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t
+        .contract
+        .create_stream(&t.sender, &t.recipient, &t.token_address, &1_000, &100, &1_100, &100);
+
+    // Nothing vested at the start.
+    assert_eq!(t.contract.progress(&id), 0);
+    // Halfway is 50 percent, in basis points.
+    t.set_time(600);
+    assert_eq!(t.contract.progress(&id), 5_000);
+    // Fully vested at the end.
+    t.set_time(1_100);
+    assert_eq!(t.contract.progress(&id), 10_000);
+}
+
+#[test]
 fn locked_decreases_as_the_stream_vests() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);

@@ -267,6 +267,25 @@ impl StreamContract {
         Ok(stream.total_amount - vested)
     }
 
+    /// Vesting progress in basis points, from 0 (nothing vested) to 10000
+    /// (fully vested). Useful for rendering a progress indicator without
+    /// fetching the full stream. A stream with nothing left to vest, including
+    /// a cancelled one, reports 10000.
+    pub fn progress(env: Env, id: u64) -> Result<u32, StreamError> {
+        let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
+        if stream.total_amount == 0 {
+            return Ok(10_000);
+        }
+        let vested = vesting::vested_amount(
+            stream.total_amount,
+            stream.start_time,
+            stream.end_time,
+            stream.cliff_time,
+            env.ledger().timestamp(),
+        );
+        Ok((vested * 10_000 / stream.total_amount) as u32)
+    }
+
     /// Lifecycle status of a stream at the current ledger time.
     pub fn status(env: Env, id: u64) -> Result<StreamStatus, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
