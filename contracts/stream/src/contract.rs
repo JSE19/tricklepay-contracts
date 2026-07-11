@@ -71,6 +71,9 @@ impl StreamContract {
             id,
             token: token.clone(),
             total_amount,
+            start_time,
+            end_time,
+            cliff_time,
         }
         .publish(&env);
 

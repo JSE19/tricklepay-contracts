@@ -1,7 +1,9 @@
 use soroban_sdk::{contractevent, Address};
 
 /// Emitted when a new stream is opened. Indexers can filter on the `sender`
-/// and `recipient` topics to find streams for either party.
+/// and `recipient` topics to find streams for either party. The schedule fields
+/// are included so an indexer can record the full stream without a follow-up
+/// `get_stream` call.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Created {
@@ -12,6 +14,9 @@ pub struct Created {
     pub id: u64,
     pub token: Address,
     pub total_amount: i128,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub cliff_time: u64,
 }
 
 /// Emitted when a recipient withdraws vested tokens.
