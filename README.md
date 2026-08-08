@@ -38,16 +38,26 @@ seconds, matching the ledger clock.
 | --- | --- | --- |
 | `create_stream(sender, recipient, token, total_amount, start_time, end_time, cliff_time) -> u64` | sender | Locks `total_amount` and opens a stream, returning its id. |
 | `withdraw(id) -> i128` | recipient | Transfers the vested, unwithdrawn balance to the recipient. |
+| `withdraw_amount(id, amount) -> i128` | recipient | Transfers exactly `amount`; fails if it exceeds the withdrawable balance. |
 | `cancel(id) -> i128` | sender | Refunds the unvested remainder to the sender and freezes the stream. |
 | `get_stream(id) -> Stream` | anyone | Returns the full stream record. |
 | `withdrawable(id) -> i128` | anyone | Amount the recipient can withdraw right now. |
 | `vested(id) -> i128` | anyone | Total vested so far, including what was withdrawn. |
+| `locked(id) -> i128` | anyone | Amount still unvested; zero once the stream completes or is cancelled. |
+| `progress(id) -> u32` | anyone | Vesting progress in basis points, from `0` to `10000`. |
 | `status(id) -> StreamStatus` | anyone | `Pending`, `Streaming`, `Completed`, or `Cancelled`. |
 | `stream_count() -> u64` | anyone | Number of streams created; ids run from 0 upward. |
 
+The first four calls move tokens and require authorization from the caller
+named above. The rest are read-only views computed from the stream record and
+the current ledger time; those that take an id return `StreamNotFound` when no
+stream has it.
+
 The contract publishes `Created`, `Withdrawn`, and `Cancelled` events, each
 carrying the parties as topics so an indexer can filter streams by sender or
-recipient.
+recipient. `Created` also carries the schedule, so a stream can be recorded
+without a follow-up `get_stream` call, and `withdraw` and `withdraw_amount`
+publish the same `Withdrawn` event.
 
 ## Building
 
