@@ -5,7 +5,7 @@ use crate::types::Stream;
 /// Number of ledgers an entry lives before it must be bumped. At the standard
 /// five second close time this is roughly thirty days, which gives active
 /// streams plenty of headroom between touches.
-const ENTRY_TTL: u32 = 518_400;
+pub(crate) const ENTRY_TTL: u32 = 518_400;
 /// When an accessed entry has fewer than this many ledgers left, extend it
 /// back up to `ENTRY_TTL`.
 const BUMP_THRESHOLD: u32 = 103_680;
