@@ -5,14 +5,19 @@ use soroban_sdk::contracterror;
 /// Each variant maps to a stable integer code so that callers and
 /// off-chain indexers can match on a value that does not change between
 /// builds.
+///
+/// Authorization failures are deliberately not represented here. Access
+/// control is enforced with `require_auth()`, which panics with a host auth
+/// error before the entry point body runs, so an unauthorized call never
+/// returns one of these codes. Code 2 was an `Unauthorized` variant that
+/// nothing ever constructed; it is retired and must not be reused, which is
+/// why the codes below skip it rather than close the gap.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum StreamError {
     /// No stream exists for the requested identifier.
     StreamNotFound = 1,
-    /// The caller is not allowed to perform this action on the stream.
-    Unauthorized = 2,
     /// The start time is not strictly before the end time.
     InvalidTimeRange = 3,
     /// The total amount is zero or negative.
