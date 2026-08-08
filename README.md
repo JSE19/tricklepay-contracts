@@ -100,6 +100,11 @@ contracts/stream/src/
   test.rs       integration tests and the shared test harness
 ```
 
+## Changelog
+
+Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md), including
+changes to the error codes, which are part of the public ABI.
+
 ## Related repositories
 
 - **tricklepay-backend** — indexes stream events and serves a read API.
