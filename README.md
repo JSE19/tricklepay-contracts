@@ -24,10 +24,20 @@ A stream is defined by a total amount and a window of time:
   vesting continues linearly from there. A stream with `cliff == start` has no
   cliff.
 - **Withdraw** sends the recipient whatever has vested minus what they have
-  already taken.
+  already taken. A partial withdrawal (`withdraw_amount`) names a figure
+  instead and transfers exactly that, up to the same balance; whatever is left
+  stays in the stream and keeps growing as more vests. The two can be mixed
+  freely — draw a fixed sum each month, then sweep the remainder at the end.
 - **Cancel** stops a stream early. The recipient keeps everything vested up to
   that moment; the unvested remainder is refunded to the sender. A cancelled
   stream's vested balance stays claimable.
+
+A stream can also be read at any time without changing it. The vested and
+`locked` amounts mirror each other and always sum to the total, while
+`progress` reports the same ratio in basis points, from 0 to 10000, for
+rendering a progress bar. Cancelling freezes the total at whatever had vested,
+so a cancelled stream reports nothing locked and full progress even when it was
+stopped early.
 
 All amounts are in the token's smallest unit. All times are Unix timestamps in
 seconds, matching the ledger clock.
@@ -84,8 +94,10 @@ cargo clippy --all-targets   # lints
 ```
 
 The suite covers the vesting math in isolation and the contract end to end:
-stepwise withdrawal, cliff gating, cancellation splits, authorization
-requirements, invalid input, and double-withdraw and unknown-id guards.
+stepwise withdrawal, partial withdrawal and its over-request and non-positive
+guards, cliff gating, cancellation splits, the `locked` and `progress` views
+across a stream's life, authorization requirements, invalid input, and
+double-withdraw and unknown-id guards.
 
 ## Deploying to testnet
 
