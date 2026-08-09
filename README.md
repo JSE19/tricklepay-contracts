@@ -24,10 +24,20 @@ A stream is defined by a total amount and a window of time:
   vesting continues linearly from there. A stream with `cliff == start` has no
   cliff.
 - **Withdraw** sends the recipient whatever has vested minus what they have
-  already taken.
+  already taken. A partial withdrawal (`withdraw_amount`) names a figure
+  instead and transfers exactly that, up to the same balance; whatever is left
+  stays in the stream and keeps growing as more vests. The two can be mixed
+  freely — draw a fixed sum each month, then sweep the remainder at the end.
 - **Cancel** stops a stream early. The recipient keeps everything vested up to
   that moment; the unvested remainder is refunded to the sender. A cancelled
   stream's vested balance stays claimable.
+
+A stream can also be read at any time without changing it. The vested and
+`locked` amounts mirror each other and always sum to the total, while
+`progress` reports the same ratio in basis points, from 0 to 10000, for
+rendering a progress bar. Cancelling freezes the total at whatever had vested,
+so a cancelled stream reports nothing locked and full progress even when it was
+stopped early.
 
 All amounts are in the token's smallest unit. All times are Unix timestamps in
 seconds, matching the ledger clock.
@@ -38,16 +48,26 @@ seconds, matching the ledger clock.
 | --- | --- | --- |
 | `create_stream(sender, recipient, token, total_amount, start_time, end_time, cliff_time) -> u64` | sender | Locks `total_amount` and opens a stream, returning its id. |
 | `withdraw(id) -> i128` | recipient | Transfers the vested, unwithdrawn balance to the recipient. |
+| `withdraw_amount(id, amount) -> i128` | recipient | Transfers exactly `amount`; fails if it exceeds the withdrawable balance. |
 | `cancel(id) -> i128` | sender | Refunds the unvested remainder to the sender and freezes the stream. |
 | `get_stream(id) -> Stream` | anyone | Returns the full stream record. |
 | `withdrawable(id) -> i128` | anyone | Amount the recipient can withdraw right now. |
 | `vested(id) -> i128` | anyone | Total vested so far, including what was withdrawn. |
+| `locked(id) -> i128` | anyone | Amount still unvested; zero once the stream completes or is cancelled. |
+| `progress(id) -> u32` | anyone | Vesting progress in basis points, from `0` to `10000`. |
 | `status(id) -> StreamStatus` | anyone | `Pending`, `Streaming`, `Completed`, or `Cancelled`. |
 | `stream_count() -> u64` | anyone | Number of streams created; ids run from 0 upward. |
 
+The first four calls move tokens and require authorization from the caller
+named above. The rest are read-only views computed from the stream record and
+the current ledger time; those that take an id return `StreamNotFound` when no
+stream has it.
+
 The contract publishes `Created`, `Withdrawn`, and `Cancelled` events, each
 carrying the parties as topics so an indexer can filter streams by sender or
-recipient.
+recipient. `Created` also carries the schedule, so a stream can be recorded
+without a follow-up `get_stream` call, and `withdraw` and `withdraw_amount`
+publish the same `Withdrawn` event.
 
 ## Building
 
@@ -74,8 +94,10 @@ cargo clippy --all-targets   # lints
 ```
 
 The suite covers the vesting math in isolation and the contract end to end:
-stepwise withdrawal, cliff gating, cancellation splits, authorization
-requirements, invalid input, and double-withdraw and unknown-id guards.
+stepwise withdrawal, partial withdrawal and its over-request and non-positive
+guards, cliff gating, cancellation splits, the `locked` and `progress` views
+across a stream's life, authorization requirements, invalid input, and
+double-withdraw and unknown-id guards.
 
 ## Deploying to testnet
 
