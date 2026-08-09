@@ -2,13 +2,13 @@ use soroban_sdk::{contracttype, Env};
 
 use crate::types::Stream;
 
-/// Number of ledgers a stream entry lives before it must be bumped. At the
-/// standard five second close time this is roughly thirty days, which gives
-/// active streams plenty of headroom between touches.
-const STREAM_TTL: u32 = 518_400;
-/// When an accessed stream has fewer than this many ledgers left, extend it
-/// back up to `STREAM_TTL`.
-const STREAM_BUMP_THRESHOLD: u32 = 103_680;
+/// Number of ledgers an entry lives before it must be bumped. At the standard
+/// five second close time this is roughly thirty days, which gives active
+/// streams plenty of headroom between touches.
+pub(crate) const ENTRY_TTL: u32 = 518_400;
+/// When an accessed entry has fewer than this many ledgers left, extend it
+/// back up to `ENTRY_TTL`.
+const BUMP_THRESHOLD: u32 = 103_680;
 
 /// Keys for entries the contract keeps in storage.
 #[contracttype]
@@ -33,6 +33,19 @@ pub fn set_stream_count(env: &Env, count: u64) {
     env.storage().instance().set(&DataKey::StreamCount, &count);
 }
 
+/// Refresh the contract instance's time to live.
+///
+/// The instance holds [`DataKey::StreamCount`], the source of every stream id.
+/// Unlike a stream entry, nothing bumps it as a side effect of being read, so
+/// a contract left untouched past its lifetime would be archived and take the
+/// id sequence with it. Extending on the same schedule as stream entries keeps
+/// the counter alive for as long as the streams it numbers.
+pub fn extend_instance_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(BUMP_THRESHOLD, ENTRY_TTL);
+}
+
 /// Look up a stream by id, if one exists.
 pub fn get_stream(env: &Env, id: u64) -> Option<Stream> {
     let key = DataKey::Stream(id);
@@ -40,7 +53,7 @@ pub fn get_stream(env: &Env, id: u64) -> Option<Stream> {
     if stream.is_some() {
         env.storage()
             .persistent()
-            .extend_ttl(&key, STREAM_BUMP_THRESHOLD, STREAM_TTL);
+            .extend_ttl(&key, BUMP_THRESHOLD, ENTRY_TTL);
     }
     stream
 }
@@ -51,5 +64,5 @@ pub fn set_stream(env: &Env, id: u64, stream: &Stream) {
     env.storage().persistent().set(&key, stream);
     env.storage()
         .persistent()
-        .extend_ttl(&key, STREAM_BUMP_THRESHOLD, STREAM_TTL);
+        .extend_ttl(&key, BUMP_THRESHOLD, ENTRY_TTL);
 }

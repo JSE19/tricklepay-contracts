@@ -1,11 +1,12 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Ledger as _},
+    testutils::{storage::Instance as _, Address as _, Ledger as _},
     token, Address, Env,
 };
 
 use crate::contract::{StreamContract, StreamContractClient};
+use crate::storage::ENTRY_TTL;
 use crate::{StreamError, StreamStatus};
 
 /// A fully wired test environment: a registered stream contract, a token to
@@ -53,6 +54,35 @@ impl<'a> StreamTest<'a> {
     /// Set the ledger timestamp, in Unix seconds.
     pub fn set_time(&self, ts: u64) {
         self.env.ledger().set_timestamp(ts);
+    }
+
+    /// Move the ledger sequence to `seq`, simulating elapsed ledgers rather
+    /// than elapsed wall-clock time. Entry lifetimes are counted in ledgers,
+    /// so this is the clock that time to live is measured against.
+    pub fn set_sequence(&self, seq: u32) {
+        self.env.ledger().set_sequence_number(seq);
+    }
+
+    /// Ledgers of life remaining on the contract instance, which is where the
+    /// stream id counter lives.
+    pub fn instance_ttl(&self) -> u32 {
+        let address = self.contract.address.clone();
+        self.env
+            .as_contract(&address, || self.env.storage().instance().get_ttl())
+    }
+
+    /// Open a stream over `[100, 1100]` with no cliff, the shape most of these
+    /// tests use.
+    fn open_default_stream(&self, amount: i128) -> u64 {
+        self.contract.create_stream(
+            &self.sender,
+            &self.recipient,
+            &self.token_address,
+            &amount,
+            &100,
+            &1_100,
+            &100,
+        )
     }
 }
 
@@ -128,9 +158,15 @@ fn withdraw_releases_vested_in_steps() {
 fn progress_reports_basis_points() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
-    let id = t
-        .contract
-        .create_stream(&t.sender, &t.recipient, &t.token_address, &1_000, &100, &1_100, &100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
 
     // Nothing vested at the start.
     assert_eq!(t.contract.progress(&id), 0);
@@ -146,9 +182,15 @@ fn progress_reports_basis_points() {
 fn locked_decreases_as_the_stream_vests() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
-    let id = t
-        .contract
-        .create_stream(&t.sender, &t.recipient, &t.token_address, &1_000, &100, &1_100, &100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
 
     // At the start the whole amount is locked.
     assert_eq!(t.contract.locked(&id), 1_000);
@@ -164,9 +206,15 @@ fn locked_decreases_as_the_stream_vests() {
 fn withdraw_amount_takes_a_partial_balance() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
-    let id = t
-        .contract
-        .create_stream(&t.sender, &t.recipient, &t.token_address, &1_000, &100, &1_100, &100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
 
     // Midpoint: 500 vested. Take only 200 of it.
     t.set_time(600);
@@ -415,4 +463,56 @@ fn operations_on_unknown_stream_report_not_found() {
         t.contract.try_withdrawable(&99),
         Err(Ok(StreamError::StreamNotFound))
     );
+}
+
+#[test]
+fn create_stream_extends_the_instance_ttl() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // A fresh instance only gets the ledger's minimum lifetime, which is far
+    // shorter than the window stream entries are given.
+    let default_ttl = t.instance_ttl();
+    assert!(
+        default_ttl < ENTRY_TTL,
+        "expected the default instance TTL to be shorter than ENTRY_TTL"
+    );
+
+    t.open_default_stream(1_000);
+
+    // Creating a stream lifts the instance to the same window its streams get,
+    // so the counter cannot be archived out from under streams that outlive
+    // the default lifetime.
+    assert_eq!(t.instance_ttl(), ENTRY_TTL);
+}
+
+#[test]
+fn stream_count_survives_a_ledger_advance_past_the_default_ttl() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+    let first = t.open_default_stream(1_000);
+
+    // Advance well past the lifetime the instance would have had without the
+    // bump in `create_stream`.
+    let default_ttl = t.env.ledger().get().min_persistent_entry_ttl;
+    let advanced_to = default_ttl * 2;
+    t.set_sequence(advanced_to);
+
+    // The instance is still carrying the window `create_stream` granted it,
+    // less the ledgers that have elapsed since.
+    //
+    // This has to be an exact check rather than "is there any life left". The
+    // in-memory test host silently restores an expired persistent entry on
+    // access instead of archiving it, so without the bump the counter would
+    // still answer and the instance would still report a non-zero TTL — just
+    // the bare minimum the restore grants, not the window streams get.
+    assert_eq!(t.instance_ttl(), ENTRY_TTL - advanced_to);
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Ids keep marching from where they left off rather than restarting and
+    // colliding with the stream already in storage.
+    let second = t.open_default_stream(1_000);
+    assert_eq!(second, first + 1);
+    assert_eq!(t.contract.stream_count(), 2);
+    assert_eq!(t.contract.get_stream(&first).total_amount, 1_000);
 }

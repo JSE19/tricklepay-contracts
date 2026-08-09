@@ -64,6 +64,7 @@ impl StreamContract {
         };
         storage::set_stream(&env, id, &stream);
         storage::set_stream_count(&env, id + 1);
+        storage::extend_instance_ttl(&env);
 
         events::Created {
             sender: sender.clone(),
