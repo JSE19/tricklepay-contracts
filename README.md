@@ -69,6 +69,26 @@ recipient. `Created` also carries the schedule, so a stream can be recorded
 without a follow-up `get_stream` call, and `withdraw` and `withdraw_amount`
 publish the same `Withdrawn` event.
 
+## Security model
+
+**The contract has no pause, freeze, or emergency-stop function.** There is no
+admin or owner account. The deployed bytecode is immutable — there is no
+upgrade path. If a bug is discovered after deployment, in-flight streams
+cannot be halted or migrated; every token locked in a stream is exposed to any
+vulnerability in the deployed code for the full duration of that stream.
+
+The only unilateral escape hatch available to either party is the sender's
+`cancel`, which returns the unvested portion to the sender. It does not recover
+tokens that have already vested.
+
+This is an explicit design choice: adding a pause mechanism would introduce a
+privileged key whose compromise could freeze every stream on the contract
+simultaneously. The design removes that risk at the cost of operational
+flexibility.
+
+Full details — including the rationale, consequences for lock-up decisions, and
+out-of-scope risks — are in [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ## Building
 
 A recent stable Rust toolchain with the `wasm32-unknown-unknown` target is
@@ -126,6 +146,9 @@ contracts/stream/src/
 
 Notable changes are recorded in [CHANGELOG.md](CHANGELOG.md), including
 changes to the error codes, which are part of the public ABI.
+
+The security properties and known limitations described above are documented
+in full in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Related repositories
 
