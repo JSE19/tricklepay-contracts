@@ -199,6 +199,10 @@ impl StreamContract {
         }
 
         let now = env.ledger().timestamp();
+
+        if now >= stream.end_time {
+            return Err(StreamError::StreamAlreadyCompleted);
+        }
         let vested = vesting::vested_amount(
             stream.total_amount,
             stream.start_time,
