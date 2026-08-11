@@ -7,7 +7,7 @@ use soroban_sdk::{
 
 use crate::contract::{StreamContract, StreamContractClient};
 use crate::storage::ENTRY_TTL;
-use crate::{StreamError, StreamStatus};
+use crate::{StreamError, StreamStatus, MAX_AMOUNT};
 
 /// A fully wired test environment: a registered stream contract, a token to
 /// stream, and helpers to fund accounts and move the ledger clock.
@@ -606,4 +606,119 @@ fn stream_count_survives_a_ledger_advance_past_the_default_ttl() {
     assert_eq!(second, first + 1);
     assert_eq!(t.contract.stream_count(), 2);
     assert_eq!(t.contract.get_stream(&first).total_amount, 1_000);
+}
+
+// ── Overflow-guard / MAX_AMOUNT boundary tests ──────────────────────────────
+
+/// `create_stream` must reject `total_amount == MAX_AMOUNT + 1` with
+/// `AmountTooLarge`. This is the boundary value: one above the cap.
+#[test]
+fn create_stream_rejects_amount_above_max() {
+    // Mint enough so the token transfer is not the thing that fails.
+    let t = StreamTest::setup(MAX_AMOUNT + 1);
+    t.set_time(100);
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &(MAX_AMOUNT + 1),
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::AmountTooLarge)));
+
+    // No stream was created and no funds left the sender.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), MAX_AMOUNT + 1);
+}
+
+/// `create_stream` must accept exactly `MAX_AMOUNT` — the boundary is
+/// inclusive and the stream must work end-to-end without overflow.
+#[test]
+fn create_stream_accepts_max_amount() {
+    let t = StreamTest::setup(MAX_AMOUNT);
+    t.set_time(100);
+
+    // A one-second stream maximises elapsed/duration pressure.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &MAX_AMOUNT,
+        &100,
+        &101,
+        &100,
+    );
+
+    // At the midpoint (t == 100, i.e. 0 elapsed out of 1 second) nothing
+    // has vested yet.
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // At end_time the full amount is vested and withdrawable without panic.
+    t.set_time(101);
+    assert_eq!(t.contract.withdrawable(&id), MAX_AMOUNT);
+    assert_eq!(t.contract.withdraw(&id), MAX_AMOUNT);
+    assert_eq!(t.token.balance(&t.recipient), MAX_AMOUNT);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// `i128::MAX` is well above `MAX_AMOUNT` and must be rejected.
+#[test]
+fn create_stream_rejects_i128_max() {
+    // We cannot actually mint i128::MAX tokens (the token contract would
+    // reject it), so we only check that *our* guard fires before the
+    // transfer is attempted. Use try_create_stream to observe the error.
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &i128::MAX,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::AmountTooLarge)));
+}
+
+/// A long-lived stream (duration close to u64::MAX) with an amount at the
+/// cap must compute vested amounts without overflow at any point in time.
+/// We sample a handful of checkpoints to exercise the multiplication.
+#[test]
+fn vesting_with_max_amount_over_long_duration_does_not_overflow() {
+    // Use a very long stream: 0 to u64::MAX/2 to keep timestamps representable.
+    let duration: u64 = u64::MAX / 2;
+    let start: u64 = 0;
+    let end: u64 = duration;
+
+    let t = StreamTest::setup(MAX_AMOUNT);
+    t.set_time(start);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &MAX_AMOUNT,
+        &start,
+        &end,
+        &start,
+    );
+
+    // Quarter-point
+    t.set_time(duration / 4);
+    let q = t.contract.vested(&id);
+    assert!(q > 0 && q < MAX_AMOUNT, "quarter-point vested={q} out of range");
+
+    // Midpoint
+    t.set_time(duration / 2);
+    let half = t.contract.vested(&id);
+    assert!(half > q, "midpoint must exceed quarter-point");
+
+    // At end_time the full amount vests.
+    t.set_time(end);
+    assert_eq!(t.contract.vested(&id), MAX_AMOUNT);
 }
