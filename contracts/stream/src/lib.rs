@@ -16,6 +16,6 @@ mod vesting;
 #[cfg(test)]
 mod test;
 
-pub use contract::{StreamContract, StreamContractClient};
+pub use contract::{StreamContract, StreamContractClient, MAX_AMOUNT};
 pub use error::StreamError;
 pub use types::{Stream, StreamStatus};

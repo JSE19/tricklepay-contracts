@@ -32,4 +32,11 @@ pub enum StreamError {
     InsufficientBalance = 8,
     /// The stream has already completed (now >= end_time) and cannot be cancelled.
     StreamAlreadyCompleted = 9,
+    /// `total_amount` exceeds the maximum allowed value.
+    ///
+    /// The vesting calculation multiplies `total_amount` by an elapsed-time
+    /// value that can be as large as `u64::MAX`. Capping amounts at `i64::MAX`
+    /// guarantees the product never overflows `i128`, because
+    /// `i64::MAX * u64::MAX < i128::MAX`.
+    AmountTooLarge = 10,
 }

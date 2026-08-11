@@ -6,6 +6,18 @@ use crate::storage;
 use crate::types::{Stream, StreamStatus};
 use crate::vesting;
 
+/// Maximum value accepted for `total_amount` at stream creation.
+///
+/// The vesting arithmetic computes `total_amount * elapsed / duration` where
+/// `elapsed` can be at most `u64::MAX` seconds (the full range of the ledger
+/// clock). To guarantee that intermediate `i128` multiplication never
+/// overflows — regardless of stream duration — amounts are capped at
+/// `i64::MAX` (≈ 9.2 × 10¹⁸ stroops). The bound is well above the total
+/// supply of any realistic token and satisfies:
+///
+///   `i64::MAX as i128 * u64::MAX as i128 < i128::MAX`
+pub const MAX_AMOUNT: i128 = i64::MAX as i128;
+
 #[contract]
 pub struct StreamContract;
 
@@ -36,6 +48,9 @@ impl StreamContract {
 
         if total_amount <= 0 {
             return Err(StreamError::InvalidAmount);
+        }
+        if total_amount > MAX_AMOUNT {
+            return Err(StreamError::AmountTooLarge);
         }
         if start_time >= end_time {
             return Err(StreamError::InvalidTimeRange);

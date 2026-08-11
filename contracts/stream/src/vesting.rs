@@ -16,8 +16,10 @@
 ///
 /// Realistic token amounts and durations stay well inside `i128`. The
 /// intermediate `total_amount * elapsed` product is the one place that could
-/// overflow for extreme inputs, which the contract guards against by bounding
-/// amounts at creation.
+/// overflow for extreme inputs; `create_stream` guards against this by
+/// rejecting any `total_amount` above `i64::MAX`. Because `elapsed` is
+/// bounded by `u64::MAX`, the product `i64::MAX * u64::MAX` fits inside
+/// `i128::MAX` and the multiplication is unconditionally safe.
 pub fn vested_amount(
     total_amount: i128,
     start_time: u64,
