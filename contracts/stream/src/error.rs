@@ -30,4 +30,6 @@ pub enum StreamError {
     NothingToWithdraw = 7,
     /// The requested withdrawal is larger than the available balance.
     InsufficientBalance = 8,
+    /// The stream has already completed (now >= end_time) and cannot be cancelled.
+    StreamAlreadyCompleted = 9,
 }

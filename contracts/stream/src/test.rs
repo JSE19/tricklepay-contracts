@@ -510,6 +510,72 @@ fn create_stream_rejects_invalid_parameters() {
 }
 
 #[test]
+fn cancel_on_stream_at_end_time_is_rejected() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Move the clock to exactly end_time — the stream is now fully vested.
+    t.set_time(1_100);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+
+    // Cancel must be rejected.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::StreamAlreadyCompleted))
+    );
+
+    // The stream still reports Completed, not Cancelled.
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+
+    // No tokens moved back to the sender — the contract still holds them.
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+}
+
+#[test]
+fn cancel_past_end_time_is_rejected_and_status_stays_completed() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Move well past the end of the stream.
+    t.set_time(5_000);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+
+    // Cancel must be rejected regardless of how far past end_time we are.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::StreamAlreadyCompleted))
+    );
+
+    // Status is unchanged — the stream is still Completed, not Cancelled.
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+
+    // The recipient can still withdraw the full amount.
+    assert_eq!(t.contract.withdrawable(&id), 1_000);
+    assert_eq!(t.contract.withdraw(&id), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+#[test]
 fn second_withdraw_without_progress_is_rejected() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
