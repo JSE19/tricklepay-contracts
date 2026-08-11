@@ -305,6 +305,97 @@ fn cancel_refunds_unvested_and_preserves_vested() {
     );
 }
 
+// ── Post-cancellation view correctness ──────────────────────────────────────
+
+/// `cancel` rewrites `total_amount`, `start_time`, `cliff_time`, and
+/// `end_time`. The doc comments on `locked` and `progress` make specific
+/// claims about the values a cancelled stream should report (0 and 10 000
+/// respectively). This test verifies those claims, along with `status` and
+/// `withdrawable`, immediately after cancellation and before the recipient
+/// has touched their remaining balance.
+#[test]
+fn views_are_correct_on_a_cancelled_stream() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at the exact midpoint: 500 has vested, 500 is still locked.
+    t.set_time(600);
+    t.contract.cancel(&id);
+
+    // locked() must be 0 after cancellation — the doc comment guarantees it.
+    // cancel() freezes total_amount at the vested amount, so total - vested == 0.
+    assert_eq!(t.contract.locked(&id), 0);
+
+    // progress() must be 10 000 after cancellation — the doc comment guarantees
+    // it. The stream is considered fully vested relative to its frozen total.
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // status() must report Cancelled.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // withdrawable() must equal the vested-but-not-yet-taken balance: the
+    // recipient cancelled at the midpoint and has withdrawn nothing, so 500
+    // is still available.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+}
+
+/// Same four view assertions, but run again after the recipient has drained
+/// the remaining vested balance. Once the recipient withdraws, withdrawable
+/// must fall to 0 and the other views must stay stable. This also confirms
+/// the token balances add up and a second withdraw is rejected.
+#[test]
+fn views_remain_correct_after_recipient_drains_cancelled_stream() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at the midpoint and then advance time well past the original end
+    // to confirm the frozen state does not change with the clock.
+    t.set_time(600);
+    t.contract.cancel(&id);
+    t.set_time(2_000);
+
+    // Recipient drains their share.
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+
+    // Token balances add up to the original total — nothing was lost.
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+
+    // Views must remain consistent after the drain.
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.progress(&id), 10_000);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // withdrawable() must now be 0 — the recipient took everything.
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // A second withdraw attempt must be rejected.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+}
+
 #[test]
 fn withdraw_requires_recipient_authorization() {
     let t = StreamTest::setup(1_000);
