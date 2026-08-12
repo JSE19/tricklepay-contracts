@@ -777,7 +777,10 @@ fn vesting_with_max_amount_over_long_duration_does_not_overflow() {
     // Quarter-point
     t.set_time(duration / 4);
     let q = t.contract.vested(&id);
-    assert!(q > 0 && q < MAX_AMOUNT, "quarter-point vested={q} out of range");
+    assert!(
+        q > 0 && q < MAX_AMOUNT,
+        "quarter-point vested={q} out of range"
+    );
 
     // Midpoint
     t.set_time(duration / 2);
