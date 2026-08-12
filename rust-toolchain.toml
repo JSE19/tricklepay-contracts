@@ -1,4 +1,7 @@
 [toolchain]
 channel = "stable"
-targets = ["wasm32-unknown-unknown"]
+# soroban-sdk rejects wasm32-unknown-unknown on Rust 1.82+, which enables
+# reference-types and multi-value that the Soroban environment does not yet
+# support. wasm32v1-none is the supported target and needs Rust 1.84+.
+targets = ["wasm32v1-none"]
 components = ["rustfmt", "clippy"]

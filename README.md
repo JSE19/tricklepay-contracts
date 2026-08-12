@@ -91,19 +91,21 @@ out-of-scope risks — are in [THREAT_MODEL.md](THREAT_MODEL.md).
 
 ## Building
 
-A recent stable Rust toolchain with the `wasm32-unknown-unknown` target is
-required; the pinned versions are in `rust-toolchain.toml`.
+Rust 1.84 or newer with the `wasm32v1-none` target is required; the pinned
+versions are in `rust-toolchain.toml`. Note that `wasm32-unknown-unknown` does
+not work: on Rust 1.82+ it enables wasm features the Soroban environment does
+not support, and soroban-sdk fails the build rather than produce a bad artifact.
 
 ```bash
 # Native build and the full test suite
 cargo test
 
 # Optimized WASM ready to deploy
-cargo build --release --target wasm32-unknown-unknown
+cargo build --release --target wasm32v1-none
 ```
 
 The release artifact is written to
-`target/wasm32-unknown-unknown/release/tricklepay_stream.wasm`.
+`target/wasm32v1-none/release/tricklepay_stream.wasm`.
 
 ## Testing
 

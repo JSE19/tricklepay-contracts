@@ -18,10 +18,13 @@ if [ -z "$IDENTITY" ]; then
 fi
 
 NETWORK="${NETWORK:-testnet}"
-WASM="target/wasm32-unknown-unknown/release/tricklepay_stream.wasm"
+# soroban-sdk requires wasm32v1-none on Rust 1.82+; wasm32-unknown-unknown
+# enables wasm features the Soroban environment does not support.
+WASM_TARGET="wasm32v1-none"
+WASM="target/${WASM_TARGET}/release/tricklepay_stream.wasm"
 
 echo "Building optimized WASM..."
-cargo build --release --target wasm32-unknown-unknown
+cargo build --release --target "$WASM_TARGET"
 
 echo "Deploying to ${NETWORK} as '${IDENTITY}'..."
 stellar contract deploy \

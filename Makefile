@@ -1,4 +1,6 @@
-WASM_TARGET := wasm32-unknown-unknown
+# soroban-sdk requires wasm32v1-none on Rust 1.82+; wasm32-unknown-unknown
+# enables wasm features the Soroban environment does not support.
+WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
 .PHONY: all build wasm test fmt fmt-check lint clean deploy
