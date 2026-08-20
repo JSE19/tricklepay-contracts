@@ -58,6 +58,13 @@ impl StreamContract {
         if cliff_time < start_time || cliff_time > end_time {
             return Err(StreamError::InvalidCliff);
         }
+        // Reject a window that is entirely in the past. A stream whose
+        // end_time has already passed would be 100 % vested on creation —
+        // effectively an immediate transfer with extra ceremony. Callers who
+        // genuinely need that should use a token transfer directly.
+        if end_time <= env.ledger().timestamp() {
+            return Err(StreamError::StreamWindowInPast);
+        }
 
         TokenClient::new(&env, &token).transfer(
             &sender,

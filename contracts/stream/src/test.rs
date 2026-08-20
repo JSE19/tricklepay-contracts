@@ -791,3 +791,109 @@ fn vesting_with_max_amount_over_long_duration_does_not_overflow() {
     t.set_time(end);
     assert_eq!(t.contract.vested(&id), MAX_AMOUNT);
 }
+
+// ── Past time-window rejection (issue #10) ──────────────────────────────────
+
+/// A stream whose `end_time` is strictly before the current ledger time is
+/// entirely in the past and would be 100 % vested on creation. That is
+/// effectively an immediate transfer disguised as a stream, so it must be
+/// rejected with `StreamWindowInPast`.
+#[test]
+fn create_stream_rejects_end_time_in_the_past() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(1_000); // clock is now at t=1000
+
+    // Window [100, 900] ended 100 seconds ago.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &900,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamWindowInPast)));
+
+    // No stream was created and no funds left the sender.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+}
+
+/// A stream whose `end_time` equals the current ledger timestamp is also
+/// 100 % vested the instant it would be created, so it must be rejected too.
+#[test]
+fn create_stream_rejects_end_time_equal_to_now() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(1_000); // clock is now at t=1000
+
+    // Window [100, 1000] — end_time == now, fully vested immediately.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_000,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamWindowInPast)));
+
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+}
+
+/// A stream whose `start_time` is in the past but whose `end_time` is still
+/// in the future is a valid backdated schedule and must be accepted. This
+/// pattern is legitimate for, e.g., payroll that should have started last
+/// month: the employee immediately accrues the already-elapsed portion.
+#[test]
+fn create_stream_accepts_past_start_time_with_future_end_time() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(600); // clock is at t=600, midway through [100, 1100]
+
+    // start_time is in the past, end_time is in the future — this is fine.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,   // 500 seconds ago
+        &1_100, // 500 seconds from now
+        &100,
+    );
+
+    // Stream was created; funds are in the contract.
+    assert_eq!(t.contract.stream_count(), 1);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+
+    // The recipient can immediately withdraw the already-elapsed half.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.withdraw(&id), 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+}
+
+/// `end_time` one second in the future is the tightest valid window. The
+/// stream must be accepted and its single vesting tick must settle correctly.
+#[test]
+fn create_stream_accepts_end_time_one_second_in_the_future() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(1_000);
+
+    // end_time == now + 1 — just barely in the future.
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &999,
+        &1_001,
+        &999,
+    );
+
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Advance to end_time; the full amount must be withdrawable.
+    t.set_time(1_001);
+    assert_eq!(t.contract.withdrawable(&id), 1_000);
+}
