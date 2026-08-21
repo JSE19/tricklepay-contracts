@@ -39,4 +39,10 @@ pub enum StreamError {
     /// guarantees the product never overflows `i128`, because
     /// `i64::MAX * u64::MAX < i128::MAX`.
     AmountTooLarge = 10,
+    /// The stream's time window ends entirely in the past.
+    ///
+    /// `end_time` is before the current ledger timestamp, meaning the stream
+    /// would be 100 % vested the moment it is created — effectively an
+    /// immediate transfer. Use a token transfer directly instead.
+    StreamWindowInPast = 11,
 }

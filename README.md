@@ -18,7 +18,12 @@ A stream is defined by a total amount and a window of time:
 
 - **Start and end** bound the linear release. At the start nothing has vested;
   at the end the full amount has vested; in between the vested amount grows in
-  proportion to elapsed time.
+  proportion to elapsed time. The `end_time` must be strictly in the future at
+  the moment `create_stream` is called — a window whose end has already passed
+  is rejected with `StreamWindowInPast`. A window whose `start_time` is in the
+  past but whose `end_time` is still in the future is accepted: the elapsed
+  portion vests immediately, making it useful for backdated payroll or grants
+  that should have started earlier.
 - **Cliff** (optional) is a point before which nothing can be withdrawn. When
   the cliff is reached, everything accrued since the start unlocks at once and
   vesting continues linearly from there. A stream with `cliff == start` has no
@@ -62,6 +67,23 @@ The first four calls move tokens and require authorization from the caller
 named above. The rest are read-only views computed from the stream record and
 the current ledger time; those that take an id return `StreamNotFound` when no
 stream has it.
+
+### Error codes
+
+| Code | Variant | When returned |
+| --- | --- | --- |
+| 1 | `StreamNotFound` | No stream exists for the given id. |
+| 3 | `InvalidTimeRange` | `start_time` is not strictly before `end_time`. |
+| 4 | `InvalidAmount` | `total_amount` is zero or negative, or the withdrawal amount is non-positive. |
+| 5 | `InvalidCliff` | `cliff_time` falls outside `[start_time, end_time]`. |
+| 6 | `AlreadyCancelled` | Attempting to cancel a stream that was already cancelled. |
+| 7 | `NothingToWithdraw` | No vested balance is available to withdraw right now. |
+| 8 | `InsufficientBalance` | Requested withdrawal exceeds the available vested balance. |
+| 9 | `StreamAlreadyCompleted` | Attempting to cancel a stream that has fully vested (`now >= end_time`). |
+| 10 | `AmountTooLarge` | `total_amount` exceeds `i64::MAX`, the overflow-safety cap. |
+| 11 | `StreamWindowInPast` | `end_time` is at or before the current ledger timestamp. The stream would be 100 % vested on creation; use a direct token transfer instead. |
+
+Code 2 is permanently retired and will never be assigned to a new variant.
 
 The contract publishes `Created`, `Withdrawn`, and `Cancelled` events, each
 carrying the parties as topics so an indexer can filter streams by sender or
@@ -118,8 +140,9 @@ cargo clippy --all-targets   # lints
 The suite covers the vesting math in isolation and the contract end to end:
 stepwise withdrawal, partial withdrawal and its over-request and non-positive
 guards, cliff gating, cancellation splits, the `locked` and `progress` views
-across a stream's life, authorization requirements, invalid input, and
-double-withdraw and unknown-id guards.
+across a stream's life, authorization requirements, invalid input, past and
+boundary time-window rejection, backdated-start acceptance, and double-withdraw
+and unknown-id guards.
 
 ## Deploying to testnet
 
