@@ -57,8 +57,13 @@ pub enum StreamError {
     StreamCountExhausted = 12,
     /// A participant address is not valid for the role it was given.
     ///
-    /// The stream contract's own address is rejected as `sender`, `recipient`,
-    /// or `token`. As `recipient` the stream would be permanently
+    /// Returned when `sender` and `recipient` are the same address: such a
+    /// stream only locks the sender's own tokens and returns them over time,
+    /// which is almost always a swapped or unset argument rather than an
+    /// intent.
+    ///
+    /// Also returned when the stream contract's own address appears as
+    /// `sender`, `recipient`, or `token`. As `recipient` the stream would be permanently
     /// unwithdrawable: `withdraw` requires the recipient's authorization and
     /// the contract cannot sign for itself, so the locked tokens would have no
     /// claimant. As `token` it would mean invoking `transfer` on this

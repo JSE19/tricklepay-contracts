@@ -44,6 +44,21 @@ the git log rather than below.
   - As `token` the call aborted at the host level with no typed error, because
     this contract exposes no `transfer` entry point.
 
+### Changed
+
+- `create_stream` now rejects a stream whose `sender` and `recipient` are the
+  same address, with `InvalidParticipant` (code `13`). Such a stream only
+  locked the caller's own tokens and returned them over time; it was accepted
+  before. **This rejects input that previously succeeded** — callers using a
+  self-stream as a deliberate self-lockup need to change approach.
+
+- `create_stream`'s validation order is now part of its documented contract:
+  authorization, participants, amount, schedule, capacity, and only then
+  effects. All validation runs before any token transfer or storage write, so
+  a rejected call leaves nothing behind, and an argument list that breaks
+  several rules always reports the earliest group rather than whichever check
+  happens to run first. No valid call changes behaviour.
+
 ### Removed
 
 - **ABI:** `StreamError::Unauthorized`, error code `2`, is removed. Nothing in

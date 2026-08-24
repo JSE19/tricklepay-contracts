@@ -1039,3 +1039,164 @@ fn create_stream_rejects_the_contract_as_token() {
     assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
     t.assert_nothing_happened(1_000);
 }
+
+/// A stream from an address to itself only locks the sender's own tokens and
+/// hands them back over time. It is almost always a swapped or unset argument,
+/// so it is refused before any tokens move.
+#[test]
+fn create_stream_rejects_a_stream_to_self() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.sender,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// When an argument list breaks more than one rule, which error comes back is
+/// fixed by the documented order on `create_stream` rather than by the
+/// incidental arrangement of the checks. Each case below violates two rules
+/// and must report the earlier one.
+#[test]
+fn create_stream_validation_order_is_deterministic() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Participants (2) beat amount (3): self-stream with a zero amount.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.sender,
+            &t.token_address,
+            &0,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Participants (2) beat schedule (4): the contract as recipient, with a
+    // window that is also inverted.
+    let contract_address = t.contract.address.clone();
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &contract_address,
+            &t.token_address,
+            &1_000,
+            &1_100,
+            &100,
+            &1_100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Amount (3) beats schedule (4): zero amount with an inverted window.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &0,
+            &1_100,
+            &100,
+            &1_100
+        ),
+        Err(Ok(StreamError::InvalidAmount))
+    );
+
+    // Amount (3) beats capacity (5): an exhausted counter is reported only
+    // once the arguments themselves are sound.
+    t.set_stream_count(u64::MAX);
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &0,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidAmount))
+    );
+    // With sound arguments the same counter now surfaces.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::StreamCountExhausted))
+    );
+
+    // Nothing above moved a token or consumed an id.
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// Within the schedule group the order is also fixed: range, then cliff, then
+/// the past-window rule.
+#[test]
+fn create_stream_schedule_checks_run_in_order() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // An inverted window whose cliff is also out of bounds reports the range.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &1_100,
+            &100,
+            &50
+        ),
+        Err(Ok(StreamError::InvalidTimeRange))
+    );
+
+    // A cliff past the end, on a window that has also already elapsed,
+    // reports the cliff.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &10,
+            &50,
+            &60
+        ),
+        Err(Ok(StreamError::InvalidCliff))
+    );
+
+    // With a well-formed cliff, the elapsed window is what is reported.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &10,
+            &50,
+            &10
+        ),
+        Err(Ok(StreamError::StreamWindowInPast))
+    );
+
+    t.assert_nothing_happened(1_000);
+}

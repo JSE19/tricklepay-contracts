@@ -107,9 +107,27 @@ recipient is never credited more than the exact linear share.
 | `status(id) -> StreamStatus` | anyone | `Pending`, `Streaming`, `Completed`, or `Cancelled`. |
 | `stream_count() -> u64` | anyone | Number of streams created; ids run from 0 upward. |
 
-The stream contract's own address is not a valid `sender`, `recipient`, or
-`token`: each would produce a stream that cannot work, so all three are
-rejected before any tokens move.
+#### `create_stream` validation order
+
+Arguments are validated in a fixed order, and **all of it runs before any
+tokens move or any storage is written** — a rejected call leaves no transfer,
+no stream record, and no consumed id behind. When an argument list breaks more
+than one rule, the first group below decides the error, so integrators get the
+same answer every time rather than one that depends on check ordering:
+
+| | Group | Errors, in order |
+| --- | --- | --- |
+| 1 | Authorization | `sender` must authorize the call |
+| 2 | Participants | `InvalidParticipant` |
+| 3 | Amount | `InvalidAmount`, then `AmountTooLarge` |
+| 4 | Schedule | `InvalidTimeRange`, then `InvalidCliff`, then `StreamWindowInPast` |
+| 5 | Capacity | `StreamCountExhausted` |
+
+Two participant rules are enforced in group 2. `sender` and `recipient` must
+differ: a stream to yourself only locks your own tokens and returns them over
+time, which is almost always a swapped or unset argument. And the stream
+contract's own address is not a valid `sender`, `recipient`, or `token`, since
+each would produce a stream that cannot work.
 
 The first four calls move tokens and require authorization from the caller
 named above. The rest are read-only views computed from the stream record and
@@ -131,7 +149,7 @@ stream has it.
 | 10 | `AmountTooLarge` | `total_amount` exceeds `i64::MAX`, the overflow-safety cap. |
 | 11 | `StreamWindowInPast` | `end_time` is at or before the current ledger timestamp. The stream would be 100 % vested on creation; use a direct token transfer instead. |
 | 12 | `StreamCountExhausted` | The id counter has reached `u64::MAX`. No further stream can be created; ids are never reused. |
-| 13 | `InvalidParticipant` | `sender`, `recipient`, or `token` is the stream contract's own address. |
+| 13 | `InvalidParticipant` | `sender` equals `recipient`, or `sender`/`recipient`/`token` is the stream contract's own address. |
 
 Code 2 is permanently retired and will never be assigned to a new variant.
 
@@ -194,7 +212,8 @@ across a stream's life, the cliff and no-cliff schedules documented above,
 authorization requirements, invalid input, past and
 boundary time-window rejection, backdated-start acceptance, id-counter
 exhaustion at the `u64::MAX` boundary, rejection of the contract's own address
-in each participant role, and double-withdraw and unknown-id guards.
+in each participant role, self-streams, the documented precedence between
+validation groups, and double-withdraw and unknown-id guards.
 
 ## Deploying to testnet
 
