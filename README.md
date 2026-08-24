@@ -26,8 +26,18 @@ A stream is defined by a total amount and a window of time:
   that should have started earlier.
 - **Cliff** (optional) is a point before which nothing can be withdrawn. When
   the cliff is reached, everything accrued since the start unlocks at once and
-  vesting continues linearly from there. A stream with `cliff == start` has no
-  cliff.
+  vesting continues linearly from there. `cliff_time` must fall inside
+  `[start_time, end_time]`; anything outside is rejected with `InvalidCliff`.
+
+  **A stream has no cliff when `cliff_time == start_time`.** There is no
+  separate flag or null value to pass — the cliff is always a timestamp, and
+  setting it to the start makes the gate vacuous. The contract withholds
+  everything while `now < cliff_time || now < start_time`, so when the two are
+  equal that reduces to `now < start_time`: exactly the start check every
+  stream already applies. The no-cliff case is not special-cased anywhere in
+  the vesting math, it simply falls out of the same expression. At the other
+  end of the range, `cliff_time == end_time` is equally valid and withholds
+  everything until the window closes — a pure lockup that vests in one step.
 - **Withdraw** sends the recipient whatever has vested minus what they have
   already taken. A partial withdrawal (`withdraw_amount`) names a figure
   instead and transfers exactly that, up to the same balance; whatever is left
@@ -46,6 +56,40 @@ stopped early.
 
 All amounts are in the token's smallest unit. All times are Unix timestamps in
 seconds, matching the ledger clock.
+
+### Example schedule
+
+Both examples stream **1000 units from `start_time = 100` to `end_time = 1100`**
+— the reference stream the vesting tests use. Every row below is asserted in
+[`vesting.rs`](contracts/stream/src/vesting.rs).
+
+Without a cliff, `cliff_time == start_time == 100`:
+
+| Time | Vested | |
+| --- | --- | --- |
+| 50 | 0 | before the start, nothing has vested |
+| 350 | 250 | a quarter of the window has elapsed |
+| 600 | 500 | the midpoint |
+| 850 | 750 | three quarters |
+| 1100 | 1000 | the end: fully vested |
+| 9999 | 1000 | past the end, still capped at the total |
+
+With a cliff at the midpoint, `cliff_time == 600`:
+
+| Time | Vested | |
+| --- | --- | --- |
+| 300 | 0 | past the start, but the cliff has not been reached |
+| 600 | 500 | the cliff releases everything accrued since the start, at once |
+| 850 | 750 | vesting continues linearly from the cliff onward |
+| 1100 | 1000 | the end: fully vested |
+
+The two schedules agree everywhere from the cliff onward. A cliff does not
+change the rate or the total, it only withholds the earlier portion and then
+releases it in one step.
+
+Vested amounts are computed as `total_amount * elapsed / duration` in integer
+arithmetic, so a fractional unit is truncated rather than rounded up and the
+recipient is never credited more than the exact linear share.
 
 ## Contract interface
 
@@ -146,7 +190,8 @@ cargo clippy --all-targets   # lints
 The suite covers the vesting math in isolation and the contract end to end:
 stepwise withdrawal, partial withdrawal and its over-request and non-positive
 guards, cliff gating, cancellation splits, the `locked` and `progress` views
-across a stream's life, authorization requirements, invalid input, past and
+across a stream's life, the cliff and no-cliff schedules documented above,
+authorization requirements, invalid input, past and
 boundary time-window rejection, backdated-start acceptance, id-counter
 exhaustion at the `u64::MAX` boundary, rejection of the contract's own address
 in each participant role, and double-withdraw and unknown-id guards.
