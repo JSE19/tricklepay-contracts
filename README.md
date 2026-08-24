@@ -63,6 +63,10 @@ seconds, matching the ledger clock.
 | `status(id) -> StreamStatus` | anyone | `Pending`, `Streaming`, `Completed`, or `Cancelled`. |
 | `stream_count() -> u64` | anyone | Number of streams created; ids run from 0 upward. |
 
+The stream contract's own address is not a valid `sender`, `recipient`, or
+`token`: each would produce a stream that cannot work, so all three are
+rejected before any tokens move.
+
 The first four calls move tokens and require authorization from the caller
 named above. The rest are read-only views computed from the stream record and
 the current ledger time; those that take an id return `StreamNotFound` when no
@@ -83,6 +87,7 @@ stream has it.
 | 10 | `AmountTooLarge` | `total_amount` exceeds `i64::MAX`, the overflow-safety cap. |
 | 11 | `StreamWindowInPast` | `end_time` is at or before the current ledger timestamp. The stream would be 100 % vested on creation; use a direct token transfer instead. |
 | 12 | `StreamCountExhausted` | The id counter has reached `u64::MAX`. No further stream can be created; ids are never reused. |
+| 13 | `InvalidParticipant` | `sender`, `recipient`, or `token` is the stream contract's own address. |
 
 Code 2 is permanently retired and will never be assigned to a new variant.
 
@@ -143,8 +148,8 @@ stepwise withdrawal, partial withdrawal and its over-request and non-positive
 guards, cliff gating, cancellation splits, the `locked` and `progress` views
 across a stream's life, authorization requirements, invalid input, past and
 boundary time-window rejection, backdated-start acceptance, id-counter
-exhaustion at the `u64::MAX` boundary, and double-withdraw and unknown-id
-guards.
+exhaustion at the `u64::MAX` boundary, rejection of the contract's own address
+in each participant role, and double-withdraw and unknown-id guards.
 
 ## Deploying to testnet
 

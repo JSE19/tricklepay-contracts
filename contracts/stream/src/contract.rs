@@ -33,7 +33,9 @@ impl StreamContract {
     /// Returns the id assigned to the new stream.
     ///
     /// Fails with [`StreamError::StreamCountExhausted`] if the id counter has
-    /// reached `u64::MAX`, which is checked before any tokens move.
+    /// reached `u64::MAX`, and with [`StreamError::InvalidParticipant`] if any
+    /// of `sender`, `recipient`, or `token` is this contract's own address.
+    /// Both are checked before any tokens move.
     // A contract entry point: every field is part of the public call shape,
     // so bundling them into a struct would only obscure the interface.
     #[allow(clippy::too_many_arguments)]
@@ -48,6 +50,16 @@ impl StreamContract {
         cliff_time: u64,
     ) -> Result<u64, StreamError> {
         sender.require_auth();
+
+        // This contract's own address is not a valid participant in any role.
+        // Each case fails in a different way — an unclaimable recipient, a
+        // token with no `transfer` entry point, a sender drawing on the
+        // holdings that back every other stream — so all three are refused
+        // here, before any tokens move.
+        let this = env.current_contract_address();
+        if sender == this || recipient == this || token == this {
+            return Err(StreamError::InvalidParticipant);
+        }
 
         if total_amount <= 0 {
             return Err(StreamError::InvalidAmount);

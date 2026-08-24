@@ -29,6 +29,21 @@ the git log rather than below.
   caller can observe this in practice; it is a fail-closed guard, not a new
   routine failure mode.
 
+- **ABI:** `StreamError::InvalidParticipant`, error code `13`. `create_stream`
+  now rejects this contract's own address as `sender`, `recipient`, or `token`,
+  checked before any tokens move. Each role previously failed in its own
+  unhelpful way:
+
+  - As `recipient` the call **succeeded**, locking the tokens permanently.
+    `withdraw` requires the recipient's authorization and the contract cannot
+    sign for itself, so nothing could ever claim them.
+  - As `sender` the transfer failed inside the token contract, which returned
+    its own `BalanceError`. That code is `10`, the same number as
+    `AmountTooLarge`, so the generated client decoded a token-contract failure
+    as an unrelated stream error.
+  - As `token` the call aborted at the host level with no typed error, because
+    this contract exposes no `transfer` entry point.
+
 ### Removed
 
 - **ABI:** `StreamError::Unauthorized`, error code `2`, is removed. Nothing in

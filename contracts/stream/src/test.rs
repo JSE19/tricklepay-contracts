@@ -79,6 +79,14 @@ impl<'a> StreamTest<'a> {
             .as_contract(&address, || storage::set_stream_count(&self.env, count));
     }
 
+    /// Assert a rejected `create_stream` left nothing behind: no stream, no
+    /// id consumed, and every token still with the sender.
+    pub fn assert_nothing_happened(&self, sender_balance: i128) {
+        assert_eq!(self.contract.stream_count(), 0);
+        assert_eq!(self.token.balance(&self.sender), sender_balance);
+        assert_eq!(self.token.balance(&self.contract.address), 0);
+    }
+
     /// Open a stream over `[100, 1100]` with no cliff, the shape most of these
     /// tests use.
     fn open_default_stream(&self, amount: i128) -> u64 {
@@ -965,4 +973,69 @@ fn create_stream_accepts_the_final_id_then_refuses_the_next() {
     assert_eq!(t.contract.get_stream(&id).total_amount, 1_000);
     assert_eq!(t.token.balance(&t.sender), 1_000);
     assert_eq!(t.token.balance(&t.contract.address), 1_000);
+}
+
+/// The contract's own address as recipient would lock the tokens forever:
+/// `withdraw` demands the recipient's authorization and the contract cannot
+/// sign for itself, so nothing could ever claim them.
+#[test]
+fn create_stream_rejects_the_contract_as_recipient() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract_address = t.contract.address.clone();
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &contract_address,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// The contract as sender would let a caller draw on the pooled holdings that
+/// back every other stream.
+#[test]
+fn create_stream_rejects_the_contract_as_sender() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract_address = t.contract.address.clone();
+
+    let result = t.contract.try_create_stream(
+        &contract_address,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// The contract as the token would mean calling `transfer` on this contract,
+/// which exposes no such entry point. Rejecting it turns an obscure host-level
+/// failure into a documented error.
+#[test]
+fn create_stream_rejects_the_contract_as_token() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract_address = t.contract.address.clone();
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &contract_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
 }

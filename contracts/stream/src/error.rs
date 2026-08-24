@@ -55,4 +55,14 @@ pub enum StreamError {
     /// practice, but the contract fails closed rather than corrupt existing
     /// records.
     StreamCountExhausted = 12,
+    /// A participant address is not valid for the role it was given.
+    ///
+    /// The stream contract's own address is rejected as `sender`, `recipient`,
+    /// or `token`. As `recipient` the stream would be permanently
+    /// unwithdrawable: `withdraw` requires the recipient's authorization and
+    /// the contract cannot sign for itself, so the locked tokens would have no
+    /// claimant. As `token` it would mean invoking `transfer` on this
+    /// contract, which exposes no such entry point. As `sender` a caller could
+    /// draw on the contract's own holdings, which back every other stream.
+    InvalidParticipant = 13,
 }
