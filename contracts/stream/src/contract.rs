@@ -31,6 +31,9 @@ impl StreamContract {
     /// pass `cliff_time == start_time` for a stream with no cliff.
     ///
     /// Returns the id assigned to the new stream.
+    ///
+    /// Fails with [`StreamError::StreamCountExhausted`] if the id counter has
+    /// reached `u64::MAX`, which is checked before any tokens move.
     // A contract entry point: every field is part of the public call shape,
     // so bundling them into a struct would only obscure the interface.
     #[allow(clippy::too_many_arguments)]
@@ -66,13 +69,19 @@ impl StreamContract {
             return Err(StreamError::StreamWindowInPast);
         }
 
+        // Reserve the id before any tokens move. The counter is the source of
+        // every id and never reuses one, so if it were allowed to wrap the
+        // next stream would be written over a record that already exists.
+        // Checking here means an exhausted counter costs the caller nothing.
+        let id = storage::stream_count(&env);
+        let next_id = id.checked_add(1).ok_or(StreamError::StreamCountExhausted)?;
+
         TokenClient::new(&env, &token).transfer(
             &sender,
             env.current_contract_address(),
             &total_amount,
         );
 
-        let id = storage::stream_count(&env);
         let stream = Stream {
             sender: sender.clone(),
             recipient: recipient.clone(),
@@ -85,7 +94,7 @@ impl StreamContract {
             cancelled: false,
         };
         storage::set_stream(&env, id, &stream);
-        storage::set_stream_count(&env, id + 1);
+        storage::set_stream_count(&env, next_id);
         storage::extend_instance_ttl(&env);
 
         events::Created {

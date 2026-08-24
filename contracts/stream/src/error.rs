@@ -45,4 +45,14 @@ pub enum StreamError {
     /// would be 100 % vested the moment it is created — effectively an
     /// immediate transfer. Use a token transfer directly instead.
     StreamWindowInPast = 11,
+    /// The stream counter has no ids left to assign.
+    ///
+    /// Ids come from a monotonic `u64` counter that never reuses a value. Once
+    /// it reaches `u64::MAX` no further stream can be opened: incrementing
+    /// past that point would wrap to zero and hand out ids that already exist
+    /// in storage, silently overwriting live streams. Reaching this bound
+    /// requires `u64::MAX` successful creations and is not realistic in
+    /// practice, but the contract fails closed rather than corrupt existing
+    /// records.
+    StreamCountExhausted = 12,
 }

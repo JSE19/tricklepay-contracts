@@ -15,6 +15,20 @@ Nothing has been released yet and no version is tagged; `0.1.0` is still in
 development. This changelog starts here, so earlier development history is in
 the git log rather than below.
 
+### Added
+
+- **ABI:** `StreamError::StreamCountExhausted`, error code `12`. Stream ids come
+  from a monotonic `u64` counter, and `create_stream` previously incremented it
+  unchecked. At `u64::MAX` that increment would wrap to zero and the next
+  stream would be written over the record already holding id `0`, destroying it
+  along with the claim on its locked tokens. Creation now fails with this code
+  instead, checked before any tokens move so a rejected call costs the caller
+  nothing.
+
+  Reaching the bound takes `u64::MAX` successful creations, so no existing
+  caller can observe this in practice; it is a fail-closed guard, not a new
+  routine failure mode.
+
 ### Removed
 
 - **ABI:** `StreamError::Unauthorized`, error code `2`, is removed. Nothing in

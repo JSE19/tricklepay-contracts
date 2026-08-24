@@ -6,7 +6,7 @@ use soroban_sdk::{
 };
 
 use crate::contract::{StreamContract, StreamContractClient};
-use crate::storage::ENTRY_TTL;
+use crate::storage::{self, ENTRY_TTL};
 use crate::{StreamError, StreamStatus, MAX_AMOUNT};
 
 /// A fully wired test environment: a registered stream contract, a token to
@@ -69,6 +69,14 @@ impl<'a> StreamTest<'a> {
         let address = self.contract.address.clone();
         self.env
             .as_contract(&address, || self.env.storage().instance().get_ttl())
+    }
+
+    /// Force the id counter to `count`, so boundary behaviour can be reached
+    /// without actually opening `u64::MAX` streams.
+    pub fn set_stream_count(&self, count: u64) {
+        let address = self.contract.address.clone();
+        self.env
+            .as_contract(&address, || storage::set_stream_count(&self.env, count));
     }
 
     /// Open a stream over `[100, 1100]` with no cliff, the shape most of these
@@ -896,4 +904,65 @@ fn create_stream_accepts_end_time_one_second_in_the_future() {
     // Advance to end_time; the full amount must be withdrawable.
     t.set_time(1_001);
     assert_eq!(t.contract.withdrawable(&id), 1_000);
+}
+
+/// The id counter must never wrap. At `u64::MAX` there is no id left to hand
+/// out, so creation is refused outright rather than rolling over to zero and
+/// overwriting the stream that already holds id 0.
+#[test]
+fn create_stream_rejects_an_exhausted_counter() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    t.set_stream_count(u64::MAX);
+
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamCountExhausted)));
+
+    // The counter is untouched and the rejection cost the sender nothing:
+    // the check runs before the token transfer.
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// The last id below the ceiling is still usable, and using it takes the
+/// counter to exactly `u64::MAX` — the point at which the next call must fail.
+#[test]
+fn create_stream_accepts_the_final_id_then_refuses_the_next() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+    t.set_stream_count(u64::MAX - 1);
+
+    // The final id is handed out normally.
+    let id = t.open_default_stream(1_000);
+    assert_eq!(id, u64::MAX - 1);
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.contract.get_stream(&id).total_amount, 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+
+    // The very next creation has nowhere left to go.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamCountExhausted)));
+
+    // The stream that owns the final id is intact and the second amount never
+    // left the sender.
+    assert_eq!(t.contract.get_stream(&id).total_amount, 1_000);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
 }

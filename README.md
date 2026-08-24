@@ -82,6 +82,7 @@ stream has it.
 | 9 | `StreamAlreadyCompleted` | Attempting to cancel a stream that has fully vested (`now >= end_time`). |
 | 10 | `AmountTooLarge` | `total_amount` exceeds `i64::MAX`, the overflow-safety cap. |
 | 11 | `StreamWindowInPast` | `end_time` is at or before the current ledger timestamp. The stream would be 100 % vested on creation; use a direct token transfer instead. |
+| 12 | `StreamCountExhausted` | The id counter has reached `u64::MAX`. No further stream can be created; ids are never reused. |
 
 Code 2 is permanently retired and will never be assigned to a new variant.
 
@@ -141,8 +142,9 @@ The suite covers the vesting math in isolation and the contract end to end:
 stepwise withdrawal, partial withdrawal and its over-request and non-positive
 guards, cliff gating, cancellation splits, the `locked` and `progress` views
 across a stream's life, authorization requirements, invalid input, past and
-boundary time-window rejection, backdated-start acceptance, and double-withdraw
-and unknown-id guards.
+boundary time-window rejection, backdated-start acceptance, id-counter
+exhaustion at the `u64::MAX` boundary, and double-withdraw and unknown-id
+guards.
 
 ## Deploying to testnet
 
