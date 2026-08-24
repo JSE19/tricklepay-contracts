@@ -15,6 +15,50 @@ Nothing has been released yet and no version is tagged; `0.1.0` is still in
 development. This changelog starts here, so earlier development history is in
 the git log rather than below.
 
+### Added
+
+- **ABI:** `StreamError::StreamCountExhausted`, error code `12`. Stream ids come
+  from a monotonic `u64` counter, and `create_stream` previously incremented it
+  unchecked. At `u64::MAX` that increment would wrap to zero and the next
+  stream would be written over the record already holding id `0`, destroying it
+  along with the claim on its locked tokens. Creation now fails with this code
+  instead, checked before any tokens move so a rejected call costs the caller
+  nothing.
+
+  Reaching the bound takes `u64::MAX` successful creations, so no existing
+  caller can observe this in practice; it is a fail-closed guard, not a new
+  routine failure mode.
+
+- **ABI:** `StreamError::InvalidParticipant`, error code `13`. `create_stream`
+  now rejects this contract's own address as `sender`, `recipient`, or `token`,
+  checked before any tokens move. Each role previously failed in its own
+  unhelpful way:
+
+  - As `recipient` the call **succeeded**, locking the tokens permanently.
+    `withdraw` requires the recipient's authorization and the contract cannot
+    sign for itself, so nothing could ever claim them.
+  - As `sender` the transfer failed inside the token contract, which returned
+    its own `BalanceError`. That code is `10`, the same number as
+    `AmountTooLarge`, so the generated client decoded a token-contract failure
+    as an unrelated stream error.
+  - As `token` the call aborted at the host level with no typed error, because
+    this contract exposes no `transfer` entry point.
+
+### Changed
+
+- `create_stream` now rejects a stream whose `sender` and `recipient` are the
+  same address, with `InvalidParticipant` (code `13`). Such a stream only
+  locked the caller's own tokens and returned them over time; it was accepted
+  before. **This rejects input that previously succeeded** — callers using a
+  self-stream as a deliberate self-lockup need to change approach.
+
+- `create_stream`'s validation order is now part of its documented contract:
+  authorization, participants, amount, schedule, capacity, and only then
+  effects. All validation runs before any token transfer or storage write, so
+  a rejected call leaves nothing behind, and an argument list that breaks
+  several rules always reports the earliest group rather than whichever check
+  happens to run first. No valid call changes behaviour.
+
 ### Removed
 
 - **ABI:** `StreamError::Unauthorized`, error code `2`, is removed. Nothing in

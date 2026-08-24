@@ -97,6 +97,54 @@ mod tests {
     }
 
     #[test]
+    fn three_quarters_vest_at_the_three_quarter_point() {
+        assert_eq!(vested_amount(TOTAL, START, END, START, 850), 750);
+    }
+
+    /// `cliff == start` is how a caller expresses "no cliff". It is not
+    /// special-cased: the cliff gate collapses into the start check, so it
+    /// behaves exactly like a cliff that has already passed.
+    #[test]
+    fn cliff_equal_to_start_behaves_as_no_cliff() {
+        for now in [50, 100, 350, 600, 850, END, 9_999] {
+            assert_eq!(
+                vested_amount(TOTAL, START, END, START, now),
+                vested_amount(TOTAL, START, END, 0, now),
+                "cliff == start must match a cliff already in the past"
+            );
+        }
+    }
+
+    /// The two schedules documented in the README. A cliff changes neither the
+    /// rate nor the total; it withholds the earlier portion and then releases
+    /// it in one step, after which the schedules are identical.
+    #[test]
+    fn cliff_schedule_matches_the_readme_example() {
+        const CLIFF: u64 = 600;
+
+        assert_eq!(vested_amount(TOTAL, START, END, CLIFF, 300), 0);
+        assert_eq!(vested_amount(TOTAL, START, END, CLIFF, CLIFF), 500);
+        assert_eq!(vested_amount(TOTAL, START, END, CLIFF, 850), 750);
+        assert_eq!(vested_amount(TOTAL, START, END, CLIFF, END), TOTAL);
+
+        for now in [CLIFF, 850, END] {
+            assert_eq!(
+                vested_amount(TOTAL, START, END, CLIFF, now),
+                vested_amount(TOTAL, START, END, START, now),
+                "from the cliff onward both schedules must agree"
+            );
+        }
+    }
+
+    /// A cliff at the end time is a pure lockup: nothing vests until the
+    /// window closes, then the whole amount lands at once.
+    #[test]
+    fn cliff_at_the_end_withholds_everything_until_the_window_closes() {
+        assert_eq!(vested_amount(TOTAL, START, END, END, END - 1), 0);
+        assert_eq!(vested_amount(TOTAL, START, END, END, END), TOTAL);
+    }
+
+    #[test]
     fn integer_division_rounds_down() {
         // 10 * 1 / 3 = 3.33, truncated to 3.
         assert_eq!(vested_amount(10, 0, 3, 0, 1), 3);

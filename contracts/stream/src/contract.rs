@@ -31,6 +31,32 @@ impl StreamContract {
     /// pass `cliff_time == start_time` for a stream with no cliff.
     ///
     /// Returns the id assigned to the new stream.
+    ///
+    /// # Validation order
+    ///
+    /// Arguments are checked in a fixed order, and **all of it happens before
+    /// any tokens move or any storage is written**. A call that is rejected
+    /// leaves no trace: no transfer, no stream record, no id consumed. When an
+    /// argument list violates more than one rule, the first matching rule below
+    /// determines the error, so the result is deterministic rather than an
+    /// artefact of how the checks happen to be ordered in the body:
+    ///
+    /// 1. **Authorization** — `sender` must authorize the call.
+    /// 2. **Participants** — [`StreamError::InvalidParticipant`] if `sender`
+    ///    equals `recipient`, or if any of `sender`, `recipient`, or `token`
+    ///    is this contract's own address.
+    /// 3. **Amount** — [`StreamError::InvalidAmount`] if `total_amount` is not
+    ///    positive, then [`StreamError::AmountTooLarge`] if it exceeds
+    ///    [`MAX_AMOUNT`].
+    /// 4. **Schedule** — [`StreamError::InvalidTimeRange`] if `start_time` is
+    ///    not strictly before `end_time`, then [`StreamError::InvalidCliff`]
+    ///    if `cliff_time` falls outside `[start_time, end_time]`, then
+    ///    [`StreamError::StreamWindowInPast`] if `end_time` is not in the
+    ///    future.
+    /// 5. **Capacity** — [`StreamError::StreamCountExhausted`] if the id
+    ///    counter has reached `u64::MAX`.
+    ///
+    /// Only once all five pass are tokens transferred and the stream stored.
     // A contract entry point: every field is part of the public call shape,
     // so bundling them into a struct would only obscure the interface.
     #[allow(clippy::too_many_arguments)]
@@ -46,12 +72,33 @@ impl StreamContract {
     ) -> Result<u64, StreamError> {
         sender.require_auth();
 
+        // 1. Participants. Identity is the most fundamental precondition and
+        //    these are pure comparisons, so they run first.
+        //
+        //    A stream from an address to itself has no effect other than
+        //    locking the sender's own tokens and handing them back over time.
+        //    It is almost always a mistake — a swapped argument or an unset
+        //    field — so it is refused rather than silently accepted.
+        if sender == recipient {
+            return Err(StreamError::InvalidParticipant);
+        }
+        //    This contract's own address is not valid in any role. Each case
+        //    fails differently — an unclaimable recipient, a token with no
+        //    `transfer` entry point, a sender drawing on the holdings that
+        //    back every other stream — so all three are refused here.
+        let this = env.current_contract_address();
+        if sender == this || recipient == this || token == this {
+            return Err(StreamError::InvalidParticipant);
+        }
+
+        // 2. Amount.
         if total_amount <= 0 {
             return Err(StreamError::InvalidAmount);
         }
         if total_amount > MAX_AMOUNT {
             return Err(StreamError::AmountTooLarge);
         }
+        // 3. Schedule.
         if start_time >= end_time {
             return Err(StreamError::InvalidTimeRange);
         }
@@ -66,13 +113,22 @@ impl StreamContract {
             return Err(StreamError::StreamWindowInPast);
         }
 
+        // 4. Capacity. Reserve the id before any tokens move. The counter is
+        //    the source of every id and never reuses one, so if it were
+        //    allowed to wrap the next stream would be written over a record
+        //    that already exists. Checking here means an exhausted counter
+        //    costs the caller nothing.
+        let id = storage::stream_count(&env);
+        let next_id = id.checked_add(1).ok_or(StreamError::StreamCountExhausted)?;
+
+        // 5. Effects. Every rejection above returns before this point, so a
+        //    failed creation never moves tokens or touches storage.
         TokenClient::new(&env, &token).transfer(
             &sender,
             env.current_contract_address(),
             &total_amount,
         );
 
-        let id = storage::stream_count(&env);
         let stream = Stream {
             sender: sender.clone(),
             recipient: recipient.clone(),
@@ -85,7 +141,7 @@ impl StreamContract {
             cancelled: false,
         };
         storage::set_stream(&env, id, &stream);
-        storage::set_stream_count(&env, id + 1);
+        storage::set_stream_count(&env, next_id);
         storage::extend_instance_ttl(&env);
 
         events::Created {
