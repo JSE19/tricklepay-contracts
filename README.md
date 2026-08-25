@@ -198,6 +198,25 @@ recipient. `Created` also carries the schedule, so a stream can be recorded
 without a follow-up `get_stream` call, and `withdraw` and `withdraw_amount`
 publish the same `Withdrawn` event.
 
+## Stream enumeration
+
+**On-chain enumeration of streams by address is deliberately not supported.**
+
+Streams are keyed by numeric id only. The contract does not maintain per-sender or per-recipient index lists for the following reasons:
+
+- Soroban persistent storage is paid per entry and per ledger. Maintaining a dynamic list of ids under each address key would require unbounded storage growth and complex TTL management, imposing costs on every `create_stream` call that are proportional to how active the address is.
+- A contract-side list would need a maximum length cap or pagination scheme, adding surface area for bugs and gas exhaustion attacks.
+
+**How to enumerate streams for an address:**
+
+Use the `Created` event. Each `Created` event is published with `sender` and `recipient` as indexed topics, so any indexer (Horizon, RPC, or the tricklepay-backend) can filter events by topic to reconstruct the full set of stream ids for any address without a follow-up `get_stream` call. The event also carries the full schedule, so streams can be recorded on first observation.
+
+For a contract-only consumer with no event access:
+1. Call `stream_count()` to get the total number of streams.
+2. Call `get_stream(id)` for each id from `0` to `stream_count() - 1` and filter by `sender` or `recipient`.
+
+This is O(n) over all streams and is only suitable for small deployments or one-off queries. Production consumers should use event indexing.
+
 ## Security model
 
 **The contract has no pause, freeze, or emergency-stop function.** There is no
