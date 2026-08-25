@@ -1526,8 +1526,8 @@ fn timestamp_boundary_error_order_range_before_past_window() {
         &t.token_address,
         &1_000,
         &10,
-        &50,  // end_time is in the past (now = 1000)
-        &60,  // cliff > end: InvalidCliff fires first
+        &50, // end_time is in the past (now = 1000)
+        &60, // cliff > end: InvalidCliff fires first
     );
     assert_eq!(result2, Err(Ok(StreamError::InvalidCliff)));
 
@@ -1814,19 +1814,31 @@ fn max_u64_end_time_full_duration_no_overflow() {
     let quarter = end / 4;
     t.set_time(quarter);
     let q = t.contract.vested(&id);
-    assert!(q > 0 && q < amount, "quarter-point vested={q} must be in (0, amount)");
+    assert!(
+        q > 0 && q < amount,
+        "quarter-point vested={q} must be in (0, amount)"
+    );
 
     // Midpoint.
     let half = end / 2;
     t.set_time(half);
     let h = t.contract.vested(&id);
-    assert!(h > q, "midpoint vested={h} must exceed quarter-point vested={q}");
+    assert!(
+        h > q,
+        "midpoint vested={h} must exceed quarter-point vested={q}"
+    );
 
     // One second before end_time: almost everything has vested.
     t.set_time(end - 1);
     let near_end = t.contract.vested(&id);
-    assert!(near_end > h, "near-end vested={near_end} must exceed midpoint");
-    assert!(near_end < amount, "near-end must not yet equal the full amount");
+    assert!(
+        near_end > h,
+        "near-end vested={near_end} must exceed midpoint"
+    );
+    assert!(
+        near_end < amount,
+        "near-end must not yet equal the full amount"
+    );
 
     // At end_time: the full amount vests.
     t.set_time(end);
@@ -1911,10 +1923,7 @@ fn vesting_never_exceeds_total_amount() {
     for ts in (0u64..=2_000).step_by(100) {
         t.set_time(ts);
         let v = t.contract.vested(&id);
-        assert!(
-            v >= 0,
-            "vested must be non-negative at ts={ts}; got {v}"
-        );
+        assert!(v >= 0, "vested must be non-negative at ts={ts}; got {v}");
         assert!(
             v <= 1_000,
             "vested must not exceed total_amount at ts={ts}; got {v}"
@@ -1974,10 +1983,7 @@ fn vesting_upper_bound_holds_for_max_amount_over_long_duration() {
     for &ts in checkpoints {
         t.set_time(ts);
         let v = t.contract.vested(&id);
-        assert!(
-            v >= 0,
-            "vested must be non-negative at ts={ts}; got {v}"
-        );
+        assert!(v >= 0, "vested must be non-negative at ts={ts}; got {v}");
         assert!(
             v <= MAX_AMOUNT,
             "vested must not exceed MAX_AMOUNT at ts={ts}; got {v}"
