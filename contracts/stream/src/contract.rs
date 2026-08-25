@@ -54,7 +54,8 @@ impl StreamContract {
     ///    [`StreamError::StreamWindowInPast`] if `end_time` is not in the
     ///    future.
     /// 5. **Capacity** — [`StreamError::StreamCountExhausted`] if the id
-    ///    counter has reached `u64::MAX`.
+    ///    counter has reached `u64::MAX`. The operation fails closed without
+    ///    wrapping to zero or reusing any previously assigned stream id.
     ///
     /// Only once all five pass are tokens transferred and the stream stored.
     // A contract entry point: every field is part of the public call shape,
@@ -336,8 +337,18 @@ impl StreamContract {
     }
 
     /// Amount not yet vested: the portion still locked in the contract that the
-    /// recipient cannot withdraw yet. A cancelled stream has nothing locked,
-    /// since cancellation freezes the total at the vested amount.
+    /// recipient cannot withdraw yet.
+    ///
+    /// Locked behavior across stream lifecycle:
+    /// - Before `start_time` or `cliff_time`: returns `total_amount` (entire amount locked).
+    /// - Between `start_time` and `end_time`: decreases linearly as tokens vest (`total_amount - vested`).
+    /// - At or after `end_time`: returns `0` (0% locked).
+    /// - A cancelled stream returns `0` because cancellation freezes `total_amount` at `vested`.
+    ///
+    /// Rejections and Error Behavior:
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage
+    ///   (e.g. an unknown id or an id from a creation call rejected for invalid participants).
+    /// - `locked` is a read-only view function: it does not alter state or move tokens.
     pub fn locked(env: Env, id: u64) -> Result<i128, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         let vested = vesting::vested_amount(
@@ -351,9 +362,19 @@ impl StreamContract {
     }
 
     /// Vesting progress in basis points, from 0 (nothing vested) to 10000
-    /// (fully vested). Useful for rendering a progress indicator without
-    /// fetching the full stream. A stream with nothing left to vest, including
-    /// a cancelled one, reports 10000.
+    /// (100% vested). Useful for rendering a progress indicator without
+    /// fetching the full stream.
+    ///
+    /// Progress calculations:
+    /// - Returns `0` before `start_time` or `cliff_time`.
+    /// - Scales linearly between `0` and `10000` from `start_time` to `end_time`.
+    /// - Returns `10000` at or after `end_time`, or if `total_amount == 0`.
+    /// - A stream with nothing left to vest, including a cancelled one, reports `10000`.
+    ///
+    /// Rejections and Error Behavior:
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage
+    ///   (e.g. an unknown id or an id from a creation call rejected due to invalid participants).
+    /// - `progress` is a read-only view function: it does not alter state or move tokens.
     pub fn progress(env: Env, id: u64) -> Result<u32, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         if stream.total_amount == 0 {
@@ -370,6 +391,18 @@ impl StreamContract {
     }
 
     /// Lifecycle status of a stream at the current ledger time.
+    ///
+    /// Returns the derived [`StreamStatus`] for a valid stream:
+    /// - [`StreamStatus::Cancelled`]: if the stream has been cancelled (takes precedence).
+    /// - [`StreamStatus::Pending`]: if current ledger time `now < start_time`.
+    /// - [`StreamStatus::Streaming`]: if `start_time <= now < end_time`.
+    /// - [`StreamStatus::Completed`]: if `now >= end_time`.
+    ///
+    /// Rejections and Error Behavior:
+    /// - Returns [`StreamError::StreamNotFound`] if `id` does not exist in storage
+    ///   (e.g. an unknown id, or an id from a creation attempt rejected for invalid
+    ///   participants like the contract's own address).
+    /// - `status` is a read-only view function: it does not alter contract state or move tokens.
     pub fn status(env: Env, id: u64) -> Result<StreamStatus, StreamError> {
         let stream = storage::get_stream(&env, id).ok_or(StreamError::StreamNotFound)?;
         if stream.cancelled {
