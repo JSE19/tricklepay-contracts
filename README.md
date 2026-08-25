@@ -87,9 +87,48 @@ The two schedules agree everywhere from the cliff onward. A cliff does not
 change the rate or the total, it only withholds the earlier portion and then
 releases it in one step.
 
-Vested amounts are computed as `total_amount * elapsed / duration` in integer
-arithmetic, so a fractional unit is truncated rather than rounded up and the
-recipient is never credited more than the exact linear share.
+### Integer rounding
+
+Vested amounts are computed as:
+
+```
+vested = total_amount * elapsed / duration
+```
+
+where `elapsed = now - start_time` and `duration = end_time - start_time`. Both
+operands are cast to `i128` before the multiplication so the product never
+overflows for any amount at or below the `MAX_AMOUNT` cap (`i64::MAX` stroops).
+
+Because this is **integer (truncating) division**, any fractional stroop is
+discarded toward zero. The recipient is never credited more than their exact
+linear share — the rounding always favours the contract.
+
+**No-cliff example:** a stream of **1000 units over `[100, 1100]`** with
+`cliff_time == start_time == 100` (no cliff):
+
+| Time | `elapsed` | Exact share | Vested (truncated) |
+| --- | --- | --- | --- |
+| 350 | 250 | 250.0 | 250 |
+| 600 | 500 | 500.0 | 500 |
+| 850 | 750 | 750.0 | 750 |
+| 1100 | 1000 | 1000.0 | 1000 |
+
+The schedule above divides evenly, so truncation has no visible effect. To see
+it, consider **10 units over `[0, 3]`** queried at `now == 1`:
+`10 * 1 / 3 = 3` (not 4). This is explicitly tested in
+[`vesting.rs`](contracts/stream/src/vesting.rs) as `integer_division_rounds_down`.
+
+**Limitation:** a stream whose `total_amount` is not a multiple of `duration`
+will silently lose at most `duration - 1` stroops to rounding over the stream's
+entire life. For example, 10 units over 3 seconds delivers only 9 (3 + 3 + 3)
+rather than 10 — the last stroop never vests as a fractional unit and remains
+in the contract after the window closes. Callers who require exact delivery
+should size `total_amount` to be a multiple of `duration`, or accept the
+rounding delta as a known, bounded cost.
+
+**Compatibility note:** the formula and rounding behaviour are part of the
+public contract ABI. Any change to the rounding direction would constitute a
+breaking change to the on-chain interface.
 
 ## Contract interface
 
