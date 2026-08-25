@@ -63,25 +63,25 @@ Both examples stream **1000 units from `start_time = 100` to `end_time = 1100`**
 — the reference stream the vesting tests use. Every row below is asserted in
 [`vesting.rs`](contracts/stream/src/vesting.rs).
 
-Without a cliff, `cliff_time == start_time == 100`:
+Without a cliff, `cliff_time == start_time == 100` (no cliff):
 
-| Time | Vested | |
-| --- | --- | --- |
-| 50 | 0 | before the start, nothing has vested |
-| 350 | 250 | a quarter of the window has elapsed |
-| 600 | 500 | the midpoint |
-| 850 | 750 | three quarters |
-| 1100 | 1000 | the end: fully vested |
-| 9999 | 1000 | past the end, still capped at the total |
+| Time | Vested | Locked | Description |
+| --- | --- | --- | --- |
+| 50 | 0 | 1000 | before the start, nothing has vested; entire amount is locked |
+| 350 | 250 | 750 | a quarter of the window has elapsed |
+| 600 | 500 | 500 | the midpoint |
+| 850 | 750 | 250 | three quarters |
+| 1100 | 1000 | 0 | the end: fully vested; zero locked |
+| 9999 | 1000 | 0 | past the end, still capped at the total |
 
 With a cliff at the midpoint, `cliff_time == 600`:
 
-| Time | Vested | |
-| --- | --- | --- |
-| 300 | 0 | past the start, but the cliff has not been reached |
-| 600 | 500 | the cliff releases everything accrued since the start, at once |
-| 850 | 750 | vesting continues linearly from the cliff onward |
-| 1100 | 1000 | the end: fully vested |
+| Time | Vested | Locked | Description |
+| --- | --- | --- | --- |
+| 300 | 0 | 1000 | past the start, but the cliff has not been reached; all 1000 remains locked |
+| 600 | 500 | 500 | the cliff releases everything accrued since the start, unlocking 500 |
+| 850 | 750 | 250 | vesting continues linearly from the cliff onward |
+| 1100 | 1000 | 0 | the end: fully vested |
 
 The two schedules agree everywhere from the cliff onward. A cliff does not
 change the rate or the total, it only withholds the earlier portion and then
