@@ -301,6 +301,57 @@ fn withdraw_amount_takes_a_partial_balance() {
 }
 
 #[test]
+fn withdraw_amount_exactly_available_balance_succeeds() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let available = t.contract.withdrawable(&id);
+    assert_eq!(available, 500);
+
+    assert_eq!(t.contract.withdraw_amount(&id, &available), available);
+    assert_eq!(t.token.balance(&t.recipient), available);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, available);
+}
+
+#[test]
+fn withdraw_amount_available_plus_one_receives_insufficient_balance() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let available = t.contract.withdrawable(&id);
+    assert_eq!(available, 500);
+
+    assert_eq!(
+        t.contract.try_withdraw_amount(&id, &(available + 1)),
+        Err(Ok(StreamError::InsufficientBalance))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.contract.withdrawable(&id), available);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 0);
+}
+
+#[test]
 fn cliff_blocks_withdrawal_until_reached() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
