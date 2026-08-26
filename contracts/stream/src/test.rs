@@ -3711,6 +3711,393 @@ fn locked_view_is_read_only_and_leaves_no_side_effects() {
     assert_eq!(t.contract.stream_count(), 1);
 }
 
+// ── Issue #25: Pending status regression & invalid participant tests ──────────
+//
+// These tests verify that:
+// - A stream in `Pending` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Creation calls where the token address is the sender or recipient are
+//   rejected with `InvalidParticipant` before any tokens move.
+// - Existing valid stream creation behavior is unaffected.
+
+/// Verify that a stream in `Pending` status (`now < start_time`) behaves correctly:
+/// - `status` reports `Pending`.
+/// - `vested` is `0`, `withdrawable` is `0`, `locked` is `total_amount`, and `progress` is `0`.
+/// - `withdraw` returns `NothingToWithdraw` and transfers no tokens.
+/// - `withdraw_amount` returns `InsufficientBalance` for any positive amount and transfers no tokens.
+/// - `cancel` successfully refunds 100% of the stream amount and sets the status to `Cancelled`.
+#[test]
+fn status_pending_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 200u64;
+    let cliff = 200u64;
+    let end = 1_200u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time before start_time to make the stream Pending.
+    t.set_time(150);
+
+    // 1. Assert view functions match expected Pending values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Pending);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.locked(&id), amount);
+    assert_eq!(t.contract.progress(&id), 0);
+
+    // 2. Assert try_withdraw fails with NothingToWithdraw and leaves balances unchanged.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+
+    // 3. Assert try_withdraw_amount with positive amount fails with InsufficientBalance.
+    assert_eq!(
+        t.contract.try_withdraw_amount(&id, &1),
+        Err(Ok(StreamError::InsufficientBalance))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+
+    // 4. Assert cancel refunds 100% of the tokens to sender and transitions to Cancelled.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, amount);
+    assert_eq!(t.token.balance(&t.sender), amount);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Creation fails with `InvalidParticipant` when the token address is used as the sender.
+#[test]
+fn create_stream_rejects_token_as_sender() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Using t.token_address as the sender.
+    let result = t.contract.try_create_stream(
+        &t.token_address,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// Creation fails with `InvalidParticipant` when the token address is used as the recipient.
+#[test]
+fn create_stream_rejects_token_as_recipient() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Using t.token_address as the recipient.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.token_address,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+// ── Issue #26: Streaming status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Streaming` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Creation calls with the contract's own address as a participant are rejected
+//   deterministically, preventing any token transfers.
+
+/// Verify that a stream in `Streaming` status (`start_time <= now < end_time`) behaves correctly:
+/// - `status` reports `Streaming`.
+/// - `vested`, `withdrawable`, `locked`, and `progress` compute active linear values.
+/// - `withdraw_amount` successfully transfers a partial amount to the recipient.
+/// - `withdraw` successfully transfers all remaining withdrawable tokens.
+/// - `cancel` splits the remaining unvested tokens and refunds the sender.
+#[test]
+fn status_streaming_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to the midpoint (600) to make the stream Streaming (50% vested).
+    t.set_time(600);
+
+    // 1. Assert view functions match expected Streaming values (midpoint).
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.locked(&id), 500);
+    assert_eq!(t.contract.progress(&id), 5_000);
+
+    // 2. Assert withdraw_amount (partial withdraw) works and updates views.
+    let partial_withdrawn = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(partial_withdrawn, 200);
+    assert_eq!(t.token.balance(&t.recipient), 200);
+    assert_eq!(t.contract.withdrawable(&id), 300);
+    assert_eq!(t.contract.progress(&id), 5_000); // Progress is based on total vested, not withdrawn.
+
+    // 3. Assert withdraw (drain remaining vested) works.
+    let full_withdrawn = t.contract.withdraw(&id);
+    assert_eq!(full_withdrawn, 300);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // 4. Assert cancel refunds remaining unvested tokens (500) to sender.
+    // At ts=600, total vested = 500. Refund = 1000 - 500 = 500.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500); // 1000 initial - 1000 created + 500 refund = 500.
+    assert_eq!(t.token.balance(&t.contract.address), 0); // 500 recipient withdrawn + 500 sender refund.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Assert that creating a stream with the contract's own address as a participant
+/// is rejected with `InvalidParticipant` and no token transfer occurs.
+#[test]
+fn create_stream_rejects_contract_address_participant_regression() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract_address = t.contract.address.clone();
+
+    // Rejects contract as recipient
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &contract_address,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Rejects contract as sender
+    assert_eq!(
+        t.contract.try_create_stream(
+            &contract_address,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Rejects contract as token
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &contract_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // No token transfer occurred
+    t.assert_nothing_happened(1_000);
+}
+
+// ── Issue #27: Cancelled status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Cancelled` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, duplicate cancellations, and status queries).
+// - Counter overflow is handled without wrapping or ID reuse, returning `StreamCountExhausted`.
+
+/// Verify that a stream in `Cancelled` status behaves correctly:
+/// - `status` reports `Cancelled`.
+/// - `vested` returns the frozen vested amount.
+/// - `locked` returns `0`.
+/// - `progress` returns `10_000`.
+/// - `withdraw` successfully transfers the unwithdrawn vested tokens to the recipient.
+/// - `cancel` returns `AlreadyCancelled`.
+#[test]
+fn status_cancelled_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to the midpoint (600) where 50% is vested.
+    t.set_time(600);
+
+    // Cancel the stream. Sender gets 500 back, 500 remains in contract for recipient.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // 1. Assert view functions match expected Cancelled values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // 2. Assert try_cancel fails with AlreadyCancelled.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::AlreadyCancelled))
+    );
+
+    // 3. Assert recipient can still withdraw the 500 vested units.
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
+/// Assert that when the stream counter reaches `u64::MAX`, subsequent creation calls
+/// fail with `StreamCountExhausted` without wrapping to zero, consuming/reusing any IDs,
+/// or moving tokens.
+#[test]
+fn counter_overflow_boundary_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Mock counter to u64::MAX.
+    t.set_stream_count(u64::MAX);
+
+    // Attempting to create a stream should fail.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamCountExhausted)));
+
+    // Ensure the ID counter is not reset, wrapping does not occur, and no tokens moved.
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+// ── Issue #28: Completed status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Completed` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Once `now >= end_time`, the stream cannot be cancelled, but the recipient can
+//   withdraw any remaining vested tokens.
+
+/// Verify that a stream in `Completed` status behaves correctly:
+/// - `status` reports `Completed`.
+/// - `vested` returns `total_amount`.
+/// - `locked` returns `0`.
+/// - `progress` returns `10_000`.
+/// - `cancel` returns `StreamAlreadyCompleted`.
+/// - `withdraw_amount` (partial withdraw) works and updates `withdrawable` while status stays `Completed`.
+/// - `withdraw` successfully transfers all remaining withdrawable tokens.
+#[test]
+fn status_completed_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to or after end_time (1200) to make the stream Completed.
+    t.set_time(1200);
+
+    // 1. Assert view functions match expected Completed values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+    assert_eq!(t.contract.vested(&id), amount);
+    assert_eq!(t.contract.withdrawable(&id), amount);
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // 2. Assert try_cancel fails with StreamAlreadyCompleted.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::StreamAlreadyCompleted))
+    );
+
+    // 3. Assert withdraw_amount (partial withdraw) works and updates withdrawable.
+    let partial_withdrawn = t.contract.withdraw_amount(&id, &400);
+    assert_eq!(partial_withdrawn, 400);
+    assert_eq!(t.token.balance(&t.recipient), 400);
+    assert_eq!(t.contract.withdrawable(&id), 600);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
+
+    // 4. Assert withdraw (drain remaining vested) works.
+    let full_withdrawn = t.contract.withdraw(&id);
+    assert_eq!(full_withdrawn, 600);
+    assert_eq!(t.token.balance(&t.recipient), amount);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
+}
+
 
 
 
