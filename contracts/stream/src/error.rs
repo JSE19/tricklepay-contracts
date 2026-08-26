@@ -69,5 +69,9 @@ pub enum StreamError {
     /// claimant. As `token` it would mean invoking `transfer` on this
     /// contract, which exposes no such entry point. As `sender` a caller could
     /// draw on the contract's own holdings, which back every other stream.
+    ///
+    /// Also returned when the token address appears as `sender` or `recipient`:
+    /// a token contract cannot act as a stream participant, and attempting to
+    /// stream a token to or from its own address is an invalid configuration.
     InvalidParticipant = 13,
 }
