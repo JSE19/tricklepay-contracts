@@ -4153,6 +4153,207 @@ fn status_completed_regression_test() {
     assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
 }
 
+/// Multiple distinct senders can each create and fund streams to the same
+/// recipient, and recipient accounting (balances, stream records, withdrawable
+/// amounts) tracks each stream independently without cross-contamination.
+#[test]
+fn multiple_senders_to_one_recipient_accounting() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Setup sender B with tokens
+    let sender_b = Address::generate(&t.env);
+    let token_admin = token::StellarAssetClient::new(&t.env, &t.token_address);
+    token_admin.mint(&sender_b, &2_000);
+
+    // Sender A (t.sender) creates stream 0 to recipient (t.recipient) for 1_000 tokens
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Sender B creates stream 1 to the SAME recipient (t.recipient) for 2_000 tokens
+    let id_b = t.contract.create_stream(
+        &sender_b,
+        &t.recipient,
+        &t.token_address,
+        &2_000,
+        &100,
+        &2_100,
+        &100,
+    );
+
+    assert_eq!(id_a, 0);
+    assert_eq!(id_b, 1);
+    assert_eq!(t.contract.stream_count(), 2);
+
+    // Initial stream records are stored independently
+    let stream_a = t.contract.get_stream(&id_a);
+    assert_eq!(stream_a.sender, t.sender);
+    assert_eq!(stream_a.recipient, t.recipient);
+    assert_eq!(stream_a.total_amount, 1_000);
+    assert_eq!(stream_a.withdrawn, 0);
+
+    let stream_b = t.contract.get_stream(&id_b);
+    assert_eq!(stream_b.sender, sender_b);
+    assert_eq!(stream_b.recipient, t.recipient);
+    assert_eq!(stream_b.total_amount, 2_000);
+    assert_eq!(stream_b.withdrawn, 0);
+
+    // Total contract balance is 1_000 + 2_000 = 3_000
+    assert_eq!(t.token.balance(&t.contract.address), 3_000);
+
+    // Midpoint of stream A (time 600): stream A is 50% vested (500), stream B is 25% vested (500 out of 2000 over [100, 2100])
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // Recipient withdraws from stream A only
+    let withdrawn_a = t.contract.withdraw(&id_a);
+    assert_eq!(withdrawn_a, 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+
+    // Stream B withdrawable remains unchanged by stream A withdrawal
+    assert_eq!(t.contract.withdrawable(&id_a), 0);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // End of stream A (time 1100): stream A is 100% vested (1000 total, 500 remaining), stream B is 50% vested (1000)
+    t.set_time(1_100);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 1_000);
+
+    // Recipient withdraws remaining from stream A and half from stream B
+    assert_eq!(t.contract.withdraw(&id_a), 500);
+    assert_eq!(t.contract.withdraw(&id_b), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 2_000); // 1000 from A + 1000 from B
+
+    // Secondary (AC): confirm invalid participant calls are rejected before token transfers occur
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.recipient,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+}
+
+/// A stream where `sender` and `recipient` are the same address (including a user
+/// address or the contract's own address as both parties) is rejected
+/// deterministically with `StreamError::InvalidParticipant`. No tokens move, no
+/// stream record is created, and the stream id counter is not incremented.
+#[test]
+fn same_sender_and_recipient_stream_rejection() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Case 1: Standard user address as both sender and recipient
+    let res_user = t.contract.try_create_stream(
+        &t.sender,
+        &t.sender,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_user, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+
+    // Case 2: Contract address as both sender and recipient
+    let contract_addr = t.contract.address.clone();
+    let res_contract = t.contract.try_create_stream(
+        &contract_addr,
+        &contract_addr,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_contract, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// Native asset token compatibility: creating, funding, withdrawing, and cancelling
+/// a stream using a Stellar Asset Contract (SAC) native token.
+#[test]
+fn native_asset_token_compatibility_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(StreamContract, ());
+    let contract = StreamContractClient::new(&env, &contract_id);
+
+    // Register a Stellar Asset Contract (SAC) for native asset compatibility
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let native_token_address = sac.address();
+    let native_token = token::TokenClient::new(&env, &native_token_address);
+    let native_admin = token::StellarAssetClient::new(&env, &native_token_address);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let amount: i128 = 2_000;
+
+    native_admin.mint(&sender, &amount);
+    assert_eq!(native_token.balance(&sender), amount);
+
+    env.ledger().set_timestamp(100);
+
+    // Create stream with native asset
+    let id = contract.create_stream(
+        &sender,
+        &recipient,
+        &native_token_address,
+        &amount,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(id, 0);
+
+    // Native asset tokens locked in contract
+    assert_eq!(native_token.balance(&sender), 0);
+    assert_eq!(native_token.balance(&contract.address), amount);
+
+    // Advance to midpoint (time 600) and withdraw
+    env.ledger().set_timestamp(600);
+    let withdrawn = contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(native_token.balance(&recipient), 1_000);
+
+    // Cancel unvested remainder
+    let refund = contract.cancel(&id);
+    assert_eq!(refund, 1_000);
+    assert_eq!(native_token.balance(&sender), 1_000);
+    assert_eq!(contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Secondary AC boundary test: stream ID counter overflow at u64::MAX fails closed
+/// with StreamCountExhausted without wrapping to 0 or reusing an ID.
+#[test]
+fn stream_id_counter_overflow_fails_closed() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Force id counter to u64::MAX
+    t.set_stream_count(u64::MAX);
+
+    let res = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &500,
 // ── Stream Authorization & Access Control Coverage (Issues #73, #74, #75, #76) ──
 
 /// Issue #73: Test sender cannot withdraw.
@@ -4282,6 +4483,10 @@ fn test_recipient_claim_after_cancellation() {
         &100,
     );
 
+    assert_eq!(res, Err(Ok(StreamError::StreamCountExhausted)));
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
     // Advance clock to midpoint so 500 tokens have vested.
     t.set_time(600);
     assert_eq!(t.contract.withdrawable(&id), 500);

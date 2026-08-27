@@ -173,6 +173,21 @@ named above. The rest are read-only views computed from the stream record and
 the current ledger time; those that take an id return `StreamNotFound` when no
 stream has it.
 
+### Token allowance requirements
+
+When calling `create_stream`, the full `total_amount` of tokens is pulled immediately from the `sender` into the stream contract address via `TokenClient::transfer(&sender, &contract_address, &total_amount)` (see [`contract.rs`](contracts/stream/src/contract.rs#L133-L137)).
+
+- **Allowance Expectation:** The contract expects the `sender` to have a sufficient token balance and to have authorized the token transfer. On Soroban (SEP-41 / Stellar Asset Contract standard), calling `create_stream` invokes `sender.require_auth()`. In client integrations, the `sender` must either include the token transfer in their invocation authorization or grant an allowance to the stream contract equal to or exceeding `total_amount`.
+- **How it's checked:** The allowance and balance check occurs in step 5 of `create_stream` after all validation checks (authorization, participants, amount, schedule, capacity) pass. If `sender` lacks sufficient balance or token allowance/authorization, the token transfer panics before any stream state is created or stored.
+- **Worked example:**
+  1. A sender holds **1,000 stroops** of token `T`.
+  2. The sender approves/authorizes the stream contract to transfer **1,000 stroops** of token `T`.
+  3. The sender invokes `create_stream(sender, recipient, token_T, 1000, 100, 1100, 100)` (where `cliff_time == start_time == 100` represents the no-cliff vesting case).
+  4. Step 5 executes `TokenClient::new(&env, &token_T).transfer(&sender, &contract_address, &1000)`.
+  5. The contract balance increases by 1,000 stroops, the sender balance decreases by 1,000 stroops, and stream ID `0` is initialized with linear vesting math `vested = total_amount * elapsed / duration` matching the no-cliff example schedule in [`vesting.rs`](contracts/stream/src/vesting.rs#L108-L116).
+
+Verification and test implementations can be reviewed in [`test.rs`](contracts/stream/src/test.rs#L128-L157).
+
 ### Error codes
 
 | Code | Variant | When returned |
