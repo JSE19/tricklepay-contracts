@@ -303,10 +303,19 @@ fn withdraw_amount_takes_a_partial_balance() {
     assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
 
     // A non-positive amount is rejected.
+    let recipient_balance_before = t.token.balance(&t.recipient);
+    let contract_balance_before = t.token.balance(&t.contract.address);
+    let withdrawn_before = t.contract.get_stream(&id).withdrawn;
     assert_eq!(
         t.contract.try_withdraw_amount(&id, &0),
         Err(Ok(StreamError::InvalidAmount))
     );
+    assert_eq!(t.token.balance(&t.recipient), recipient_balance_before);
+    assert_eq!(
+        t.token.balance(&t.contract.address),
+        contract_balance_before
+    );
+    assert_eq!(t.contract.get_stream(&id).withdrawn, withdrawn_before);
 }
 
 #[test]
