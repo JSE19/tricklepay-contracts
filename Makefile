@@ -32,11 +32,11 @@ fmt-check:
 lint:
 	cargo clippy --all-targets -- -D warnings
 
-# Audit dependencies while excluding unavoidable Soroban test-host warnings.
-# These crates are transitive dependencies and are not used by the WASM
-# contract; security advisories remain enabled.
+# Audit dependencies. Unavoidable Soroban transitive warnings are ignored via
+# .cargo/audit.toml (derivative/paste unmaintained, spin yanked) - these crates
+# are not used in the deployed WASM; vulnerability advisories remain enabled.
 audit:
-	cargo audit --deny warnings --no-yanked --ignore RUSTSEC-2024-0388 --ignore RUSTSEC-2024-0436
+	cargo audit --deny warnings
 
 # Remove build artifacts.
 clean:
