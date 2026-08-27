@@ -4149,6 +4149,235 @@ fn status_completed_regression_test() {
     assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
 }
 
+// ── Issue #77: Test unknown id on every view ─────────────────────────────────
+//
+// Every view function must return `StreamNotFound` when called with an id that
+// does not exist in storage. This test exercises all seven view entry points
+// against the same unknown id and confirms the error is deterministic and
+// leaves no side effects.
 
+/// Every view function returns `StreamNotFound` for an unknown id. The error is
+/// deterministic across repeated calls and no contract state is altered.
+#[test]
+fn unknown_id_returns_stream_not_found_on_every_view() {
+    let t = StreamTest::setup(1_000);
+    let unknown_id: u64 = 42;
+
+    // get_stream
+    assert_eq!(
+        t.contract.try_get_stream(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // withdraw
+    assert_eq!(
+        t.contract.try_withdraw(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // cancel
+    assert_eq!(
+        t.contract.try_cancel(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // withdrawable
+    assert_eq!(
+        t.contract.try_withdrawable(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // vested
+    assert_eq!(
+        t.contract.try_vested(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // locked
+    assert_eq!(
+        t.contract.try_locked(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // progress
+    assert_eq!(
+        t.contract.try_progress(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    // status
+    assert_eq!(
+        t.contract.try_status(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+
+    // Deterministic: repeating the same calls yields the same errors.
+    assert_eq!(
+        t.contract.try_get_stream(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    assert_eq!(
+        t.contract.try_vested(&unknown_id),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+
+    // No side effects: stream count is zero, sender balance intact.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+// ── Issue #78: Test stream ids remain contiguous ─────────────────────────────
+//
+// Stream ids are assigned from a monotonic counter starting at 0. Creating
+// multiple streams — including after cancellations — must produce the sequence
+// 0, 1, 2, … without gaps or reuse.
+
+/// Creating several streams in sequence yields contiguous ids 0, 1, 2, …
+/// regardless of whether earlier streams have been cancelled.
+#[test]
+fn stream_ids_remain_contiguous_across_creations_and_cancellations() {
+    let t = StreamTest::setup(10_000);
+    t.set_time(100);
+
+    // Create three streams: ids must be 0, 1, 2.
+    let id0 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    let id1 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    let id2 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(id0, 0);
+    assert_eq!(id1, 1);
+    assert_eq!(id2, 2);
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Cancel stream 1 — the counter must not change.
+    t.set_time(600);
+    t.contract.cancel(&id1);
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Create a fourth stream — id must be 3, not a reuse of the cancelled id.
+    let id3 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(id3, 3);
+    assert_eq!(t.contract.stream_count(), 4);
+
+    // The cancelled stream's record is still intact at id 1.
+    assert_eq!(t.contract.get_stream(&id1).cancelled, true);
+
+    // All four stream records exist and have the correct ids.
+    for expected_id in 0..4u64 {
+        let s = t.contract.get_stream(&expected_id);
+        assert_eq!(s.total_amount, 1_000);
+    }
+}
+
+// ── Issue #79: Test stream_count read view ───────────────────────────────────
+//
+// `stream_count()` is a read-only view that returns the number of streams
+// created so far. It must be 0 on a fresh contract, advance by 1 on each
+// successful creation, and remain unchanged on rejected creations.
+
+/// `stream_count` starts at 0, increments on each creation, and is unaffected
+/// by rejected creation attempts.
+#[test]
+fn stream_count_read_view_reflects_creations_and_ignores_rejections() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+
+    // Fresh contract: count is 0.
+    assert_eq!(t.contract.stream_count(), 0);
+
+    // First creation: count becomes 1.
+    t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Rejected creation (self-stream): count must stay 1.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender, &t.sender, &t.token_address,
+            &1_000, &100, &1_100, &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Second creation: count becomes 2.
+    t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(t.contract.stream_count(), 2);
+
+    // Rejected creation (zero amount): count must stay 2.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender, &t.recipient, &t.token_address,
+            &0, &100, &1_100, &100,
+        ),
+        Err(Ok(StreamError::InvalidAmount))
+    );
+    assert_eq!(t.contract.stream_count(), 2);
+
+    // stream_count is read-only: calling it does not change the value.
+    assert_eq!(t.contract.stream_count(), 2);
+    assert_eq!(t.contract.stream_count(), 2);
+}
+
+// ── Issue #80: Test stream_count after cancellation ──────────────────────────
+//
+// Cancelling a stream must not change `stream_count`. The counter tracks how
+// many streams have been *created*, not how many are active.
+
+/// `stream_count` is unchanged after cancelling a stream.
+#[test]
+fn stream_count_unchanged_after_cancellation() {
+    let t = StreamTest::setup(3_000);
+    t.set_time(100);
+
+    // Create three streams.
+    let id0 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    let _id1 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    let _id2 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Cancel stream 0.
+    t.set_time(600);
+    t.contract.cancel(&id0);
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Cancel stream 1.
+    t.contract.cancel(&(_id1));
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Cancel stream 2.
+    t.contract.cancel(&(_id2));
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Even after all streams are cancelled, the count reflects total created.
+    assert_eq!(t.contract.stream_count(), 3);
+
+    // Creating a new stream still advances the counter.
+    let id3 = t.contract.create_stream(
+        &t.sender, &t.recipient, &t.token_address,
+        &1_000, &100, &1_100, &100,
+    );
+    assert_eq!(id3, 3);
+    assert_eq!(t.contract.stream_count(), 4);
+}
 
 
