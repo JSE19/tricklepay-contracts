@@ -3122,7 +3122,10 @@ fn vesting_property_zero_before_cliff_sweep_and_no_side_effects() {
 
         assert_eq!(v, 0, "vested must be 0 before cliff at ts={ts}");
         assert_eq!(w, 0, "withdrawable must be 0 before cliff at ts={ts}");
-        assert_eq!(l, amount, "locked must equal total_amount before cliff at ts={ts}");
+        assert_eq!(
+            l, amount,
+            "locked must equal total_amount before cliff at ts={ts}"
+        );
 
         // Attempting to withdraw before the cliff must fail cleanly without moving tokens.
         assert_eq!(
@@ -4242,7 +4245,43 @@ fn test_recipient_claim_after_cancellation() {
     assert_eq!(t.token.balance(&t.recipient), 500);
 }
 
+/// Issue #72 — Test repeated cancel failure.
+///
+/// Build a fixture where a stream is cancelled once successfully.
+/// Attempt to cancel the same stream a second time.
+/// Assert that the second cancel attempt fails deterministically with `StreamError::AlreadyCancelled`,
+/// and that no token transfer occurs on the second call.
+#[test]
+fn test_repeated_cancel_fails() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
 
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
 
+    // First cancel attempt succeeds at midpoint (ts=600).
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
 
+    // Second cancel attempt on the same stream fails with AlreadyCancelled.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::AlreadyCancelled))
+    );
 
+    // No token transfer occurred on the second call: sender balance remains 500,
+    // contract balance remains 500.
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
