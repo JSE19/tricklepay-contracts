@@ -4193,6 +4193,55 @@ fn test_cancel_refund_rounding() {
     assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
 }
 
+/// Issue #71 — Test recipient claim after cancellation.
+///
+/// Build a fixture where a stream is cancelled, then the recipient attempts to claim/withdraw.
+/// Assert that the recipient can withdraw the already-vested-but-unclaimed amount prior to cancellation,
+/// and that subsequent withdrawal attempts return `StreamError::NothingToWithdraw`.
+/// Assert token balances and stream state after the claim attempt.
+///
+/// Note on Issue #71 Acceptance Criteria:
+/// The issue AC text mentions unrelated recipient address checks. Per instructions,
+/// this test covers the recipient claim after cancellation scenario named in the title and summary.
+#[test]
+fn test_recipient_claim_after_cancellation() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at midpoint (ts=600): 500 vested, 500 refunded to sender.
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // Recipient claims/withdraws after cancellation (even advancing time further).
+    t.set_time(1_500);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+
+    // Balances after claim: recipient has 500, sender has 500, contract is 0.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Second claim attempt is rejected with NothingToWithdraw.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 500);
+}
+
 
 
 
