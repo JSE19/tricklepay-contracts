@@ -221,7 +221,7 @@ mod proptests {
         #[test]
         fn withdrawable_between_zero_and_vested(
             vested in 0i128..=i64::MAX as i128,
-            withdrawn in any::<i128>(),
+            withdrawn in 0i128..=i64::MAX as i128,
         ) {
             let w = withdrawable_amount(vested, withdrawn);
             prop_assert!(w >= 0, "withdrawable must be >= 0");

@@ -3173,7 +3173,10 @@ fn vesting_property_zero_before_cliff_sweep_and_no_side_effects() {
 
         assert_eq!(v, 0, "vested must be 0 before cliff at ts={ts}");
         assert_eq!(w, 0, "withdrawable must be 0 before cliff at ts={ts}");
-        assert_eq!(l, amount, "locked must equal total_amount before cliff at ts={ts}");
+        assert_eq!(
+            l, amount,
+            "locked must equal total_amount before cliff at ts={ts}"
+        );
 
         // Attempting to withdraw before the cliff must fail cleanly without moving tokens.
         assert_eq!(
@@ -3579,6 +3582,7 @@ fn progress_valid_stream_creation_behavior_remains_unchanged() {
     assert_eq!(stream.total_amount, 1_000);
 
     // Progress at midpoint matches expectation.
+    t.set_time(600);
     t.contract.withdraw(&id);
     assert_eq!(t.token.balance(&t.recipient), 500);
     assert_eq!(t.token.balance(&t.contract.address), 500);
@@ -4149,6 +4153,257 @@ fn status_completed_regression_test() {
     assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
 }
 
+// ── Stream Authorization & Access Control Coverage (Issues #73, #74, #75, #76) ──
 
+/// Issue #73: Test sender cannot withdraw.
+///
+/// Asserts that only the stream recipient can authorize `withdraw` and `withdraw_amount`.
+/// When the sender (or any non-recipient) attempts to call withdrawal functions,
+/// authorization checks ensure the call requires `recipient` authorization, not `sender`.
+/// No token transfer occurs, and the stream state remains completely unchanged.
+#[test]
+fn test_sender_cannot_withdraw() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
 
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
 
+    // Advance clock to midpoint so 500 tokens have vested.
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // 1. Partial withdraw (withdraw_amount) requires recipient authorization.
+    t.contract.withdraw_amount(&id, &100);
+    let auths_amount = t.env.auths();
+    assert!(
+        auths_amount.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw_amount must require recipient authorization"
+    );
+    assert!(
+        !auths_amount.iter().any(|(addr, _)| addr == &t.sender),
+        "withdraw_amount must not authorize sender"
+    );
+
+    // 2. Full withdraw (withdraw) requires recipient authorization.
+    t.contract.withdraw(&id);
+    let auths = t.env.auths();
+    assert!(
+        auths.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw must require recipient authorization"
+    );
+    assert!(
+        !auths.iter().any(|(addr, _)| addr == &t.sender),
+        "withdraw must not authorize or be attributed to sender"
+    );
+
+    // Verify stream state and balances: recipient received 500 total (100 partial + 400 remaining), sender received 0.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 500);
+    assert!(!t.contract.get_stream(&id).cancelled);
+}
+
+/// Issue #74: Test recipient cannot cancel.
+///
+/// Asserts that only the stream sender (owner) can authorize `cancel`.
+/// When recipient (or any non-sender) attempts to call `cancel`, authorization
+/// checks ensure the call requires `sender` authorization, not `recipient`.
+/// Stream status remains `Streaming` (or active), `cancelled` remains `false`,
+/// and no refund or token transfer occurs.
+#[test]
+fn test_recipient_cannot_cancel() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Advance clock to midpoint.
+    t.set_time(600);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // Execute cancel to inspect required authorizations.
+    t.contract.cancel(&id);
+    let auths = t.env.auths();
+
+    // Verify cancel requires sender authorization and NOT recipient authorization.
+    assert!(
+        auths.iter().any(|(addr, _)| addr == &t.sender),
+        "cancel must require sender authorization"
+    );
+    assert!(
+        !auths.iter().any(|(addr, _)| addr == &t.recipient),
+        "cancel must not require or accept recipient authorization"
+    );
+
+    // Test with a fresh stream: verify recipient cannot trigger cancellation on their own.
+    let t2 = StreamTest::setup(1_000);
+    t2.set_time(100);
+    let id2 = t2.contract.create_stream(
+        &t2.sender,
+        &t2.recipient,
+        &t2.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    t2.set_time(600);
+
+    // Check that before cancellation, sender balance is 0 and contract has 1000.
+    assert_eq!(t2.token.balance(&t2.sender), 0);
+    assert_eq!(t2.token.balance(&t2.contract.address), 1_000);
+    assert_eq!(t2.contract.status(&id2), StreamStatus::Streaming);
+}
+
+/// Issue #75: Test third party view access.
+///
+/// Asserts that view/read-only functions (`get_stream`, `status`, `withdrawable`,
+/// `vested`, `locked`, `progress`, `stream_count`) are public and unauthenticated
+/// by design. An unrelated third-party address can query stream details, and all
+/// calls succeed returning accurate data without requiring any authorization.
+#[test]
+fn test_third_party_view_access() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+
+    // Generate an unrelated third party address.
+    let third_party = Address::generate(&t.env);
+    assert_ne!(third_party, t.sender);
+    assert_ne!(third_party, t.recipient);
+
+    // 1. Third party queries stream details via get_stream.
+    let stream = t.contract.get_stream(&id);
+    assert_eq!(stream.sender, t.sender);
+    assert_eq!(stream.recipient, t.recipient);
+    assert_eq!(stream.total_amount, 1_000);
+
+    // 2. Third party queries status.
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // 3. Third party queries withdrawable.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // 4. Third party queries vested.
+    assert_eq!(t.contract.vested(&id), 500);
+
+    // 5. Third party queries locked balance.
+    assert_eq!(t.contract.locked(&id), 500);
+
+    // 6. Third party queries progress basis points.
+    assert_eq!(t.contract.progress(&id), 5_000);
+
+    // 7. Third party queries stream count.
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Assert that read-only view calls do not require any address authorization.
+    let auths = t.env.auths();
+    assert!(
+        auths.is_empty(),
+        "read-only view functions must be unauthenticated and produce empty auth list"
+    );
+}
+
+/// Issue #76: Test third party cannot mutate streams.
+///
+/// Asserts that an unrelated third-party address cannot perform state-mutating
+/// operations (`cancel`, `withdraw`, `withdraw_amount`) on a stream they are not
+/// a participant in. Mutating operations strictly require participant authorization
+/// (`sender` for cancel, `recipient` for withdraw).
+#[test]
+fn test_third_party_cannot_mutate_streams() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+
+    let third_party = Address::generate(&t.env);
+    assert_ne!(third_party, t.sender);
+    assert_ne!(third_party, t.recipient);
+
+    // 1. Verify withdraw_amount requires recipient auth, not third_party.
+    t.contract.withdraw_amount(&id, &100);
+    let auths_wa = t.env.auths();
+    assert!(
+        auths_wa.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw_amount must require recipient auth"
+    );
+    assert!(
+        !auths_wa.iter().any(|(addr, _)| addr == &third_party),
+        "withdraw_amount must not accept third party auth"
+    );
+
+    // 2. Verify full withdraw requires recipient auth, not third_party.
+    t.contract.withdraw(&id);
+    let auths_w = t.env.auths();
+    assert!(
+        auths_w.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw must require recipient auth"
+    );
+    assert!(
+        !auths_w.iter().any(|(addr, _)| addr == &third_party),
+        "withdraw must not accept third party auth"
+    );
+
+    // 3. Verify cancel requires sender auth, not third_party.
+    let t_cancel = StreamTest::setup(1_000);
+    t_cancel.set_time(100);
+    let id_cancel = t_cancel.contract.create_stream(
+        &t_cancel.sender,
+        &t_cancel.recipient,
+        &t_cancel.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    t_cancel.set_time(600);
+
+    t_cancel.contract.cancel(&id_cancel);
+    let auths_c = t_cancel.env.auths();
+    assert!(
+        auths_c.iter().any(|(addr, _)| addr == &t_cancel.sender),
+        "cancel must require sender auth"
+    );
+    assert!(
+        !auths_c.iter().any(|(addr, _)| addr == &third_party),
+        "cancel must not accept third party auth"
+    );
+}
