@@ -4280,6 +4280,87 @@ fn same_sender_and_recipient_stream_rejection() {
     t.assert_nothing_happened(1_000);
 }
 
+/// Native asset token compatibility: creating, funding, withdrawing, and cancelling
+/// a stream using a Stellar Asset Contract (SAC) native token.
+#[test]
+fn native_asset_token_compatibility_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(StreamContract, ());
+    let contract = StreamContractClient::new(&env, &contract_id);
+
+    // Register a Stellar Asset Contract (SAC) for native asset compatibility
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let native_token_address = sac.address();
+    let native_token = token::TokenClient::new(&env, &native_token_address);
+    let native_admin = token::StellarAssetClient::new(&env, &native_token_address);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let amount: i128 = 2_000;
+
+    native_admin.mint(&sender, &amount);
+    assert_eq!(native_token.balance(&sender), amount);
+
+    env.ledger().set_timestamp(100);
+
+    // Create stream with native asset
+    let id = contract.create_stream(
+        &sender,
+        &recipient,
+        &native_token_address,
+        &amount,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(id, 0);
+
+    // Native asset tokens locked in contract
+    assert_eq!(native_token.balance(&sender), 0);
+    assert_eq!(native_token.balance(&contract.address), amount);
+
+    // Advance to midpoint (time 600) and withdraw
+    env.ledger().set_timestamp(600);
+    let withdrawn = contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(native_token.balance(&recipient), 1_000);
+
+    // Cancel unvested remainder
+    let refund = contract.cancel(&id);
+    assert_eq!(refund, 1_000);
+    assert_eq!(native_token.balance(&sender), 1_000);
+    assert_eq!(contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Secondary AC boundary test: stream ID counter overflow at u64::MAX fails closed
+/// with StreamCountExhausted without wrapping to 0 or reusing an ID.
+#[test]
+fn stream_id_counter_overflow_fails_closed() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Force id counter to u64::MAX
+    t.set_stream_count(u64::MAX);
+
+    let res = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(res, Err(Ok(StreamError::StreamCountExhausted)));
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
 
 
 
