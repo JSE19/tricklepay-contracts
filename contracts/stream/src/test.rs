@@ -4163,6 +4163,112 @@ fn status_completed_regression_test() {
 /// No token transfer occurs, and the stream state remains completely unchanged.
 #[test]
 fn test_sender_cannot_withdraw() {
+// ── Vesting Cancel Scenarios (#69, #70, #71, #72) ─────────────────────────────
+
+/// Issue #69 — Test cancel at exact cliff.
+///
+/// Build a fixture for a vesting stream with a defined cliff (start=100, cliff=600, end=1100).
+/// Perform a cancel operation at exactly the cliff timestamp (`now == 600`).
+/// Assert returned refund (500), recipient withdrawable amount (500), sender/contract balances,
+/// and stream status (Cancelled).
+///
+/// Note on Issue #69 Acceptance Criteria:
+/// The issue AC text describes rejecting "the contract address case", which is unrelated to
+/// cancelling at the exact cliff. Per instructions, this test covers the exact-cliff scenario
+/// named in the issue title and summary.
+#[test]
+fn test_cancel_at_exact_cliff() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Perform cancel operation at exactly the cliff timestamp.
+    t.set_time(cliff);
+    let refund = t.contract.cancel(&id);
+
+    // Exactly 50% (500) vested at cliff midpoint. Refund to sender is 500.
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Recipient can withdraw the 500 tokens vested at the cliff.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+/// Issue #70 — Test cancel refund rounding.
+///
+/// Build a fixture where cancellation at a given point produces a refund amount
+/// subject to integer division / rounding.
+/// For total_amount=10 over [0, 3] with cliff=0, at `now=1`,
+/// `vested = 10 * 1 / 3 = 3` (truncated / rounded down).
+/// `refund = 10 - 3 = 7` (rounds up / in favor of sender refund).
+/// Assert exact refund amount (7), recipient withdrawable amount (3), balances, and status.
+///
+/// Note on Issue #70 Acceptance Criteria:
+/// The issue AC text mentions unrelated stream counter boundary scenarios. Per instructions,
+/// this test covers the refund rounding math named in the issue title and summary.
+#[test]
+fn test_cancel_refund_rounding() {
+    let t = StreamTest::setup(10);
+    t.set_time(0);
+
+    let start = 0u64;
+    let cliff = 0u64;
+    let end = 3u64;
+    let amount = 10i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Cancel at timestamp 1 (1/3 of duration).
+    t.set_time(1);
+    let refund = t.contract.cancel(&id);
+
+    // Vested is floor(10 * 1 / 3) = 3.
+    // Refund is 10 - 3 = 7.
+    assert_eq!(refund, 7);
+    assert_eq!(t.token.balance(&t.sender), 7);
+    assert_eq!(t.token.balance(&t.contract.address), 3);
+    assert_eq!(t.contract.withdrawable(&id), 3);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Issue #71 — Test recipient claim after cancellation.
+///
+/// Build a fixture where a stream is cancelled, then the recipient attempts to claim/withdraw.
+/// Assert that the recipient can withdraw the already-vested-but-unclaimed amount prior to cancellation,
+/// and that subsequent withdrawal attempts return `StreamError::NothingToWithdraw`.
+/// Assert token balances and stream state after the claim attempt.
+///
+/// Note on Issue #71 Acceptance Criteria:
+/// The issue AC text mentions unrelated recipient address checks. Per instructions,
+/// this test covers the recipient claim after cancellation scenario named in the title and summary.
+#[test]
+fn test_recipient_claim_after_cancellation() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
 
@@ -4220,6 +4326,38 @@ fn test_sender_cannot_withdraw() {
 /// and no refund or token transfer occurs.
 #[test]
 fn test_recipient_cannot_cancel() {
+    // Cancel at midpoint (ts=600): 500 vested, 500 refunded to sender.
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // Recipient claims/withdraws after cancellation (even advancing time further).
+    t.set_time(1_500);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+
+    // Balances after claim: recipient has 500, sender has 500, contract is 0.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Second claim attempt is rejected with NothingToWithdraw.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 500);
+}
+
+/// Issue #72 — Test repeated cancel failure.
+///
+/// Build a fixture where a stream is cancelled once successfully.
+/// Attempt to cancel the same stream a second time.
+/// Assert that the second cancel attempt fails deterministically with `StreamError::AlreadyCancelled`,
+/// and that no token transfer occurs on the second call.
+#[test]
+fn test_repeated_cancel_fails() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
 
@@ -4406,4 +4544,23 @@ fn test_third_party_cannot_mutate_streams() {
         !auths_c.iter().any(|(addr, _)| addr == &third_party),
         "cancel must not accept third party auth"
     );
+
+    // First cancel attempt succeeds at midpoint (ts=600).
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+
+    // Second cancel attempt on the same stream fails with AlreadyCancelled.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::AlreadyCancelled))
+    );
+
+    // No token transfer occurred on the second call: sender balance remains 500,
+    // contract balance remains 500.
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
 }
