@@ -393,7 +393,8 @@ impl StreamContract {
             stream.cliff_time,
             env.ledger().timestamp(),
         );
-        Ok((vested * 10_000 / stream.total_amount) as u32)
+        let progress = vested * 10_000 / stream.total_amount;
+        Ok(u32::try_from(progress.clamp(0, 10_000)).unwrap_or(0))
     }
 
     /// Lifecycle status of a stream at the current ledger time.
