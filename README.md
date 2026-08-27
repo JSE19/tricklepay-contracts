@@ -146,6 +146,30 @@ breaking change to the on-chain interface.
 | `status(id) -> StreamStatus` | anyone | `Pending`, `Streaming`, `Completed`, or `Cancelled`. |
 | `stream_count() -> u64` | anyone | Number of streams created; ids run from 0 upward. |
 
+#### Required authorization signatures
+
+The contract enforces Soroban authorization at the call site using
+`require_auth()` on the participant whose action is being authorized:
+
+- `create_stream(...)` requires `sender.require_auth()`.
+- `withdraw(...)` and `withdraw_amount(...)` require `recipient.require_auth()`.
+- `cancel(...)` requires `sender.require_auth()`.
+
+A missing or invalid signature is a host-auth failure, not a `StreamError`.
+That is intentional: authorization errors are reported by Soroban before the
+contract returns a user-facing enum value.
+
+**Concrete example:** if Alice creates a stream to Bob using token `T`, the
+wallet or client must sign the invocation with Alice's key. If the signer is
+not Alice, the authorization step fails before the contract can check the
+stream schedule or transfer funds.
+
+**Compatibility note:** the contract does not accept a custom “approval token”
+for these checks; the required signature mechanism is the standard Soroban
+`Address::require_auth()` flow. Client code should therefore attach the exact
+caller signature expected by the entry point rather than relying on a
+non-standard allowance path.
+
 #### `create_stream` validation order
 
 Arguments are validated in a fixed order, and **all of it runs before any
@@ -163,10 +187,11 @@ same answer every time rather than one that depends on check ordering:
 | 5 | Capacity | `StreamCountExhausted` |
 
 Two participant rules are enforced in group 2. `sender` and `recipient` must
-differ: a stream to yourself only locks your own tokens and returns them over
-time, which is almost always a swapped or unset argument. And the stream
-contract's own address is not a valid `sender`, `recipient`, or `token`, since
-each would produce a stream that cannot work.
+differ, and the token address must also be distinct from both of them. A stream
+where `token == sender` or `token == recipient` is invalid because the token
+contract cannot also act as a stream participant. The stream contract's own
+address is also not valid in any role (`sender`, `recipient`, or `token`),
+therefore each one triggers `InvalidParticipant` before any token transfer.
 
 The first four calls move tokens and require authorization from the caller
 named above. The rest are read-only views computed from the stream record and
