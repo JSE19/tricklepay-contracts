@@ -4243,6 +4243,43 @@ fn multiple_senders_to_one_recipient_accounting() {
     );
 }
 
+/// A stream where `sender` and `recipient` are the same address (including a user
+/// address or the contract's own address as both parties) is rejected
+/// deterministically with `StreamError::InvalidParticipant`. No tokens move, no
+/// stream record is created, and the stream id counter is not incremented.
+#[test]
+fn same_sender_and_recipient_stream_rejection() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Case 1: Standard user address as both sender and recipient
+    let res_user = t.contract.try_create_stream(
+        &t.sender,
+        &t.sender,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_user, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+
+    // Case 2: Contract address as both sender and recipient
+    let contract_addr = t.contract.address.clone();
+    let res_contract = t.contract.try_create_stream(
+        &contract_addr,
+        &contract_addr,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_contract, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
 
 
 
