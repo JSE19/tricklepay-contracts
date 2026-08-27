@@ -4149,6 +4149,100 @@ fn status_completed_regression_test() {
     assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
 }
 
+/// Multiple distinct senders can each create and fund streams to the same
+/// recipient, and recipient accounting (balances, stream records, withdrawable
+/// amounts) tracks each stream independently without cross-contamination.
+#[test]
+fn multiple_senders_to_one_recipient_accounting() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Setup sender B with tokens
+    let sender_b = Address::generate(&t.env);
+    let token_admin = token::StellarAssetClient::new(&t.env, &t.token_address);
+    token_admin.mint(&sender_b, &2_000);
+
+    // Sender A (t.sender) creates stream 0 to recipient (t.recipient) for 1_000 tokens
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Sender B creates stream 1 to the SAME recipient (t.recipient) for 2_000 tokens
+    let id_b = t.contract.create_stream(
+        &sender_b,
+        &t.recipient,
+        &t.token_address,
+        &2_000,
+        &100,
+        &2_100,
+        &100,
+    );
+
+    assert_eq!(id_a, 0);
+    assert_eq!(id_b, 1);
+    assert_eq!(t.contract.stream_count(), 2);
+
+    // Initial stream records are stored independently
+    let stream_a = t.contract.get_stream(&id_a);
+    assert_eq!(stream_a.sender, t.sender);
+    assert_eq!(stream_a.recipient, t.recipient);
+    assert_eq!(stream_a.total_amount, 1_000);
+    assert_eq!(stream_a.withdrawn, 0);
+
+    let stream_b = t.contract.get_stream(&id_b);
+    assert_eq!(stream_b.sender, sender_b);
+    assert_eq!(stream_b.recipient, t.recipient);
+    assert_eq!(stream_b.total_amount, 2_000);
+    assert_eq!(stream_b.withdrawn, 0);
+
+    // Total contract balance is 1_000 + 2_000 = 3_000
+    assert_eq!(t.token.balance(&t.contract.address), 3_000);
+
+    // Midpoint of stream A (time 600): stream A is 50% vested (500), stream B is 25% vested (500 out of 2000 over [100, 2100])
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // Recipient withdraws from stream A only
+    let withdrawn_a = t.contract.withdraw(&id_a);
+    assert_eq!(withdrawn_a, 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+
+    // Stream B withdrawable remains unchanged by stream A withdrawal
+    assert_eq!(t.contract.withdrawable(&id_a), 0);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // End of stream A (time 1100): stream A is 100% vested (1000 total, 500 remaining), stream B is 50% vested (1000)
+    t.set_time(1_100);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 1_000);
+
+    // Recipient withdraws remaining from stream A and half from stream B
+    assert_eq!(t.contract.withdraw(&id_a), 500);
+    assert_eq!(t.contract.withdraw(&id_b), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 2_000); // 1000 from A + 1000 from B
+
+    // Secondary (AC): confirm invalid participant calls are rejected before token transfers occur
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.recipient,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+}
+
 
 
 
