@@ -3173,7 +3173,10 @@ fn vesting_property_zero_before_cliff_sweep_and_no_side_effects() {
 
         assert_eq!(v, 0, "vested must be 0 before cliff at ts={ts}");
         assert_eq!(w, 0, "withdrawable must be 0 before cliff at ts={ts}");
-        assert_eq!(l, amount, "locked must equal total_amount before cliff at ts={ts}");
+        assert_eq!(
+            l, amount,
+            "locked must equal total_amount before cliff at ts={ts}"
+        );
 
         // Attempting to withdraw before the cliff must fail cleanly without moving tokens.
         assert_eq!(
@@ -4360,7 +4363,3 @@ fn stream_id_counter_overflow_fails_closed() {
     assert_eq!(t.token.balance(&t.sender), 1_000);
     assert_eq!(t.token.balance(&t.contract.address), 0);
 }
-
-
-
-
