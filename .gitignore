@@ -10,6 +10,4 @@ test_snapshots/
 .idea/
 .vscode/
 fix.md
-
-issue.md
-pr.md
+proptest-regressions/
