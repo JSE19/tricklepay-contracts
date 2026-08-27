@@ -3528,6 +3528,7 @@ fn progress_valid_stream_creation_behavior_remains_unchanged() {
     assert_eq!(stream.total_amount, 1_000);
 
     // Progress at midpoint matches expectation.
+    t.set_time(600);
     t.contract.withdraw(&id);
     assert_eq!(t.token.balance(&t.recipient), 500);
     assert_eq!(t.token.balance(&t.contract.address), 500);
@@ -4097,6 +4098,56 @@ fn status_completed_regression_test() {
     assert_eq!(t.contract.withdrawable(&id), 0);
     assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
 }
+
+// ── Vesting Cancel Scenarios (#69, #70, #71, #72) ─────────────────────────────
+
+/// Issue #69 — Test cancel at exact cliff.
+///
+/// Build a fixture for a vesting stream with a defined cliff (start=100, cliff=600, end=1100).
+/// Perform a cancel operation at exactly the cliff timestamp (`now == 600`).
+/// Assert returned refund (500), recipient withdrawable amount (500), sender/contract balances,
+/// and stream status (Cancelled).
+///
+/// Note on Issue #69 Acceptance Criteria:
+/// The issue AC text describes rejecting "the contract address case", which is unrelated to
+/// cancelling at the exact cliff. Per instructions, this test covers the exact-cliff scenario
+/// named in the issue title and summary.
+#[test]
+fn test_cancel_at_exact_cliff() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Perform cancel operation at exactly the cliff timestamp.
+    t.set_time(cliff);
+    let refund = t.contract.cancel(&id);
+
+    // Exactly 50% (500) vested at cliff midpoint. Refund to sender is 500.
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Recipient can withdraw the 500 tokens vested at the cliff.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
 
 
 
