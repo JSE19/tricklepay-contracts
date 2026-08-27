@@ -261,7 +261,13 @@ The release artifact is written to
 cargo test          # unit and integration tests
 cargo fmt --check   # formatting
 cargo clippy --all-targets   # lints
+cargo audit --deny warnings --no-yanked --ignore RUSTSEC-2024-0388 --ignore RUSTSEC-2024-0436
 ```
+
+The audit command ignores the unmaintained `derivative` and `paste` crates
+(`RUSTSEC-2024-0388` and `RUSTSEC-2024-0436`) because they are transitive
+Soroban test-host dependencies, and skips the yanked-package warning for the
+same dependency tree. Vulnerability advisories remain enabled.
 
 The suite covers the vesting math in isolation and the contract end to end:
 stepwise withdrawal, partial withdrawal and its over-request and non-positive

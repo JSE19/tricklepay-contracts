@@ -3,7 +3,7 @@
 WASM_TARGET := wasm32v1-none
 WASM := target/$(WASM_TARGET)/release/tricklepay_stream.wasm
 
-.PHONY: all build wasm test fmt fmt-check lint clean deploy
+.PHONY: all build wasm test fmt fmt-check lint audit clean deploy
 
 all: fmt-check lint test
 
@@ -31,6 +31,12 @@ fmt-check:
 # Lint every target and treat warnings as errors.
 lint:
 	cargo clippy --all-targets -- -D warnings
+
+# Audit dependencies while excluding unavoidable Soroban test-host warnings.
+# These crates are transitive dependencies and are not used by the WASM
+# contract; security advisories remain enabled.
+audit:
+	cargo audit --deny warnings --no-yanked --ignore RUSTSEC-2024-0388 --ignore RUSTSEC-2024-0436
 
 # Remove build artifacts.
 clean:
