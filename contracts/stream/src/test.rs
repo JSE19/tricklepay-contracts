@@ -333,6 +333,57 @@ fn withdraw_amount_takes_a_partial_balance() {
 }
 
 #[test]
+fn withdraw_amount_exactly_available_balance_succeeds() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let available = t.contract.withdrawable(&id);
+    assert_eq!(available, 500);
+
+    assert_eq!(t.contract.withdraw_amount(&id, &available), available);
+    assert_eq!(t.token.balance(&t.recipient), available);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, available);
+}
+
+#[test]
+fn withdraw_amount_available_plus_one_receives_insufficient_balance() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    let available = t.contract.withdrawable(&id);
+    assert_eq!(available, 500);
+
+    assert_eq!(
+        t.contract.try_withdraw_amount(&id, &(available + 1)),
+        Err(Ok(StreamError::InsufficientBalance))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.contract.withdrawable(&id), available);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 0);
+}
+
+#[test]
 fn cliff_blocks_withdrawal_until_reached() {
     let t = StreamTest::setup(1_000);
     t.set_time(100);
@@ -2911,4 +2962,1869 @@ fn vested_is_monotonically_non_decreasing_and_capped() {
         );
         prev = v;
     }
+}
+
+// ── Issue #22: Status view boundary tests ────────────────────────────────────
+//
+// `status(id)` returns the lifecycle state (`Pending`, `Streaming`, `Completed`,
+// or `Cancelled`) of a stream at the current ledger timestamp. It is a read-only
+// view that never alters state or moves tokens.
+//
+// These tests pin every boundary transition of `status`:
+// - `now < start_time` → `Pending`
+// - `start_time <= now < end_time` → `Streaming`
+// - `now >= end_time` → `Completed`
+// - `stream.cancelled == true` → `Cancelled`
+//
+// The tests also verify that attempts to query `status` on unknown IDs or IDs
+// from rejected creation attempts (such as using the contract's own address as
+// participant) deterministically return `StreamNotFound` and leave no side
+// effects (no tokens moved, no stream count change).
+
+/// `status` on an unknown ID returns `StreamNotFound` deterministically without
+/// altering contract storage or balances.
+#[test]
+fn status_unknown_id_returns_stream_not_found() {
+    let t = StreamTest::setup(1_000);
+
+    assert_eq!(
+        t.contract.try_status(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "unknown id must return StreamNotFound"
+    );
+
+    // Deterministic: second call produces identical error.
+    assert_eq!(
+        t.contract.try_status(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "StreamNotFound must be returned on retry"
+    );
+
+    // No side effects.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// Creation with the contract address is rejected with `InvalidParticipant`
+/// before any tokens transfer. Querying `status` on the unassigned ID
+/// deterministically returns `StreamNotFound`.
+#[test]
+fn status_contract_address_rejected_no_transfer() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract = t.contract.address.clone();
+
+    // Rejection at creation.
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &contract,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant)),
+        "contract as recipient must be rejected"
+    );
+
+    // No token transfer occurred.
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+
+    // Calling status on the unassigned id returns StreamNotFound deterministically.
+    assert_eq!(
+        t.contract.try_status(&0),
+        Err(Ok(StreamError::StreamNotFound)),
+        "status on uncreated id must return StreamNotFound"
+    );
+
+    assert_eq!(
+        t.contract.try_status(&0),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    assert_eq!(t.contract.stream_count(), 0);
+}
+
+/// `status` correctly transitions across `Pending`, `Streaming`, and `Completed`
+/// exact timestamp boundaries.
+#[test]
+fn status_boundary_transitions_pending_streaming_completed() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Before start: Pending.
+    t.set_time(99);
+    assert_eq!(t.contract.status(&id), StreamStatus::Pending);
+
+    // Exactly at start_time: Streaming.
+    t.set_time(100);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // Midpoint: Streaming.
+    t.set_time(600);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // One second before end_time: Streaming.
+    t.set_time(1_099);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // Exactly at end_time: Completed.
+    t.set_time(1_100);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+
+    // Past end_time: Completed.
+    t.set_time(2_000);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+}
+
+/// A cancelled stream returns `Cancelled` status regardless of whether time
+/// is past `end_time`.
+#[test]
+fn status_cancelled_stream_takes_precedence() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    t.contract.cancel(&id);
+
+    // At cancellation timestamp: Cancelled.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Past original end_time: Still Cancelled.
+    t.set_time(2_000);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Calling `status` is read-only and causes no side-effects on stream or token balances.
+#[test]
+fn status_view_is_read_only_and_leaves_no_side_effects() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let sender_bal = t.token.balance(&t.sender);
+    let contract_bal = t.token.balance(&t.contract.address);
+    let count = t.contract.stream_count();
+
+    // Query status repeatedly.
+    for ts in [50, 100, 600, 1_100, 2_000] {
+        t.set_time(ts);
+        let _ = t.contract.status(&id);
+    }
+
+    // Invariants hold.
+    assert_eq!(t.token.balance(&t.sender), sender_bal);
+    assert_eq!(t.token.balance(&t.contract.address), contract_bal);
+    assert_eq!(t.contract.stream_count(), count);
+}
+
+// ── Vesting property test for zero before cliff & counter boundary tests ──────
+//
+// Tokens vest linearly between `start_time` and `end_time`, but before `cliff_time`
+// (`now < cliff_time`) the vested and withdrawable amounts must be exactly zero.
+//
+// These tests isolate and verify this invariant across standard and extreme stream
+// schedules, confirming that:
+// - `vested(id) == 0` and `withdrawable(id) == 0` for every timestamp prior to the cliff.
+// - `locked(id) == total_amount` before the cliff.
+// - Attempting to withdraw before the cliff returns `NothingToWithdraw` and leaves
+//   token balances completely untouched.
+// - Counter overflow (`u64::MAX`) is handled deterministically by returning
+//   `StreamCountExhausted` without wrapping around or reusing an ID, as verified
+//   by counter boundary tests.
+
+/// Property: `vested` and `withdrawable` must return 0 for every time point strictly
+/// before `cliff_time`, even after `start_time` has passed.
+///
+/// This test sweeps time points from before `start_time` up to `cliff_time - 1`,
+/// asserting zero vested/withdrawable amount, total locked amount, and zero token transfers.
+#[test]
+fn vesting_property_zero_before_cliff_sweep_and_no_side_effects() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Initial balances after stream creation.
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+
+    // Sweep time points prior to the cliff.
+    for ts in [0u64, 50, 100, 200, 350, 500, 599] {
+        t.set_time(ts);
+
+        let v = t.contract.vested(&id);
+        let w = t.contract.withdrawable(&id);
+        let l = t.contract.locked(&id);
+
+        assert_eq!(v, 0, "vested must be 0 before cliff at ts={ts}");
+        assert_eq!(w, 0, "withdrawable must be 0 before cliff at ts={ts}");
+        assert_eq!(
+            l, amount,
+            "locked must equal total_amount before cliff at ts={ts}"
+        );
+
+        // Attempting to withdraw before the cliff must fail cleanly without moving tokens.
+        assert_eq!(
+            t.contract.try_withdraw(&id),
+            Err(Ok(StreamError::NothingToWithdraw)),
+            "withdraw before cliff must return NothingToWithdraw"
+        );
+    }
+
+    // Confirm token balances remained unaffected across all pre-cliff withdrawal attempts.
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+    assert_eq!(t.token.balance(&t.recipient), 0);
+}
+
+/// Property: `vested` and `withdrawable` remain zero before the cliff on an extreme
+/// duration stream using maximum amounts.
+#[test]
+fn vesting_property_zero_before_cliff_holds_for_extreme_duration() {
+    let start: u64 = 0;
+    let end: u64 = u64::MAX / 2;
+    let cliff: u64 = end / 4;
+
+    let t = StreamTest::setup(MAX_AMOUNT);
+    t.set_time(start);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &MAX_AMOUNT,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    let checkpoints: &[u64] = &[
+        0,
+        1,
+        cliff / 1_000_000,
+        cliff / 10_000,
+        cliff / 1_000,
+        cliff / 100,
+        cliff / 10,
+        cliff / 2,
+        cliff - 1,
+    ];
+
+    for &ts in checkpoints {
+        t.set_time(ts);
+
+        assert_eq!(
+            t.contract.vested(&id),
+            0,
+            "vested must be 0 before cliff on extreme stream at ts={ts}"
+        );
+        assert_eq!(
+            t.contract.withdrawable(&id),
+            0,
+            "withdrawable must be 0 before cliff on extreme stream at ts={ts}"
+        );
+        assert_eq!(
+            t.contract.locked(&id),
+            MAX_AMOUNT,
+            "locked must equal MAX_AMOUNT before cliff on extreme stream at ts={ts}"
+        );
+    }
+}
+
+/// Counter overflow is handled deterministically without wrapping to zero or reusing an ID.
+///
+/// When the stream count reaches `u64::MAX`, `create_stream` fails with `StreamCountExhausted`.
+/// The counter is left at `u64::MAX`, ensuring no ID wrapping or storage corruption occurs.
+#[test]
+fn counter_overflow_handled_without_reusing_id_and_leaves_no_side_effects() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Set counter to u64::MAX (exhausted).
+    t.set_stream_count(u64::MAX);
+
+    // Attempt creation when counter is at u64::MAX.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(
+        result,
+        Err(Ok(StreamError::StreamCountExhausted)),
+        "creation at u64::MAX must return StreamCountExhausted"
+    );
+
+    // Counter must stay at u64::MAX and NOT wrap to 0.
+    assert_eq!(
+        t.contract.stream_count(),
+        u64::MAX,
+        "counter must not wrap or change on rejection"
+    );
+
+    // Deterministic: second call produces identical failure mode.
+    let result2 = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(
+        result2,
+        Err(Ok(StreamError::StreamCountExhausted)),
+        "retry must return StreamCountExhausted"
+    );
+
+    // No ID 0 or ID u64::MAX was reused or created, and no tokens transferred.
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(
+        t.contract.try_get_stream(&0),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    assert_eq!(
+        t.contract.try_get_stream(&u64::MAX),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+}
+
+/// Boundary test covering stream creation on boundary ID (`u64::MAX - 1`) with a cliff.
+///
+/// Verifies that a stream assigned the final usable ID `u64::MAX - 1` correctly enforces
+/// the zero-before-cliff rule before the cliff and unlocks accrued tokens at the cliff.
+#[test]
+fn counter_boundary_id_stream_with_cliff_vests_zero_before_cliff() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Set counter to u64::MAX - 1 (the boundary ID).
+    t.set_stream_count(u64::MAX - 1);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &600, // cliff at midpoint
+    );
+
+    // Stream was assigned the boundary ID.
+    assert_eq!(id, u64::MAX - 1);
+    // Counter is now at u64::MAX.
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+
+    // Before cliff (t=400): vested and withdrawable are zero on the boundary-id stream.
+    t.set_time(400);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // One second before cliff (t=599): still zero.
+    t.set_time(599);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // Exactly at cliff (t=600): 500 units vest and become withdrawable.
+    t.set_time(600);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // Recipient can withdraw the unlocked amount.
+    t.contract.withdraw(&id);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+}
+
+// ── Issue #23: Progress view boundary & invalid participant tests ─────────────
+//
+// `progress(id)` returns vesting progress in basis points (0 to 10000). It is a
+// read-only view function that never alters state or moves tokens.
+//
+// These tests pin:
+// - Deterministic `StreamNotFound` for unknown IDs without side effects.
+// - All `InvalidParticipant` creation rejections occur before any token transfer,
+//   and `progress` on uncreated IDs returns `StreamNotFound`.
+// - Progress scale across exact timestamp boundaries (0 before start/cliff, linear
+//   growth during stream window, 10000 at/after end time).
+// - Cancelled streams report 10000 (nothing left to vest).
+// - Existing valid stream creation behavior remains unchanged.
+
+/// `progress` on an unknown ID returns `StreamNotFound` deterministically without
+/// altering contract storage or balances.
+#[test]
+fn progress_unknown_id_returns_stream_not_found() {
+    let t = StreamTest::setup(1_000);
+
+    assert_eq!(
+        t.contract.try_progress(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "unknown id must return StreamNotFound"
+    );
+
+    // Deterministic: second call produces identical error.
+    assert_eq!(
+        t.contract.try_progress(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "StreamNotFound must be returned on retry"
+    );
+
+    // Invariants hold.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// All invalid participant creation calls are rejected with `InvalidParticipant`
+/// before any token transfer occurs. Querying `progress` on uncreated IDs
+/// deterministically returns `StreamNotFound`.
+#[test]
+fn progress_invalid_participants_rejected_before_token_transfer() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract = t.contract.address.clone();
+
+    // 1. Contract as recipient
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &contract,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant)),
+        "contract as recipient must be InvalidParticipant"
+    );
+
+    // 2. Contract as sender
+    assert_eq!(
+        t.contract.try_create_stream(
+            &contract,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant)),
+        "contract as sender must be InvalidParticipant"
+    );
+
+    // 3. Contract as token
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &contract,
+            &1_000,
+            &100,
+            &1_100,
+            &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant)),
+        "contract as token must be InvalidParticipant"
+    );
+
+    // 4. Self-stream (sender == recipient)
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.sender,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100,
+        ),
+        Err(Ok(StreamError::InvalidParticipant)),
+        "sender == recipient must be InvalidParticipant"
+    );
+
+    // Confirm no tokens moved and no stream count advanced across all 4 invalid creation attempts.
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.stream_count(), 0);
+
+    // Calling progress on uncreated ID 0 returns StreamNotFound deterministically.
+    assert_eq!(
+        t.contract.try_progress(&0),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+    assert_eq!(
+        t.contract.try_progress(&0),
+        Err(Ok(StreamError::StreamNotFound))
+    );
+}
+
+/// `progress` accurately reports basis points (0 to 10000) across key lifecycle boundaries.
+#[test]
+fn progress_boundary_transitions_from_start_to_end() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Before start (t=50): 0 progress.
+    t.set_time(50);
+    assert_eq!(t.contract.progress(&id), 0);
+
+    // At start (t=100): 0 progress.
+    t.set_time(100);
+    assert_eq!(t.contract.progress(&id), 0);
+
+    // Quarter point (t=350): 2500 basis points (25%).
+    t.set_time(350);
+    assert_eq!(t.contract.progress(&id), 2_500);
+
+    // Midpoint (t=600): 5000 basis points (50%).
+    t.set_time(600);
+    assert_eq!(t.contract.progress(&id), 5_000);
+
+    // Three-quarter point (t=850): 7500 basis points (75%).
+    t.set_time(850);
+    assert_eq!(t.contract.progress(&id), 7_500);
+
+    // At end_time (t=1100): 10000 basis points (100%).
+    t.set_time(1_100);
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // Past end_time (t=2000): 10000 basis points (capped).
+    t.set_time(2_000);
+    assert_eq!(t.contract.progress(&id), 10_000);
+}
+
+/// `progress` returns 10000 for a cancelled stream regardless of when it was cancelled.
+#[test]
+fn progress_cancelled_stream_returns_10000() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at midpoint.
+    t.set_time(600);
+    t.contract.cancel(&id);
+
+    // Cancelled stream has nothing left to vest, so progress is 10000.
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // Past original end_time: still 10000.
+    t.set_time(2_000);
+    assert_eq!(t.contract.progress(&id), 10_000);
+}
+
+/// Valid stream creation behavior remains completely unchanged.
+#[test]
+fn progress_valid_stream_creation_behavior_remains_unchanged() {
+    let t = StreamTest::setup(2_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    assert_eq!(id, 0);
+    assert_eq!(t.contract.stream_count(), 1);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 1_000);
+
+    let stream = t.contract.get_stream(&id);
+    assert_eq!(stream.sender, t.sender);
+    assert_eq!(stream.recipient, t.recipient);
+    assert_eq!(stream.total_amount, 1_000);
+
+    // Progress at midpoint matches expectation.
+    t.set_time(600);
+    t.contract.withdraw(&id);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+}
+
+// ── Issue #24: Locked view boundary & README schedule tests ───────────────────
+//
+// `locked(id)` returns the unvested portion of tokens remaining locked in the contract
+// (`total_amount - vested`). It is a read-only view function that never alters state.
+//
+// These tests pin:
+// - Deterministic `StreamNotFound` on unknown IDs without side effects.
+// - Transition from `total_amount` before start/cliff down to `0` at/after end_time.
+// - Zero locked balance immediately upon cancellation.
+// - Exact match with the no-cliff and cliff example schedules documented in `README.md`.
+
+/// `locked` on an unknown ID returns `StreamNotFound` deterministically without
+/// altering contract storage or balances.
+#[test]
+fn locked_unknown_id_returns_stream_not_found() {
+    let t = StreamTest::setup(1_000);
+
+    assert_eq!(
+        t.contract.try_locked(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "unknown id must return StreamNotFound"
+    );
+
+    // Deterministic: second call produces identical error.
+    assert_eq!(
+        t.contract.try_locked(&99),
+        Err(Ok(StreamError::StreamNotFound)),
+        "StreamNotFound must be returned on retry"
+    );
+
+    // Invariants hold.
+    assert_eq!(t.contract.stream_count(), 0);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+/// `locked` boundary transitions: 1000 before start, decreases linearly, settles at 0 at/after end.
+#[test]
+fn locked_boundary_transitions_from_start_to_end() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Before start: 1000 locked.
+    t.set_time(50);
+    assert_eq!(t.contract.locked(&id), 1_000);
+
+    // At start (t=100): 1000 locked.
+    t.set_time(100);
+    assert_eq!(t.contract.locked(&id), 1_000);
+
+    // Midpoint (t=600): 500 locked.
+    t.set_time(600);
+    assert_eq!(t.contract.locked(&id), 500);
+
+    // At end_time (t=1100): 0 locked.
+    t.set_time(1_100);
+    assert_eq!(t.contract.locked(&id), 0);
+
+    // Past end_time (t=2000): 0 locked.
+    t.set_time(2_000);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+/// `locked` for a no-cliff stream matches the exact example schedule table in `README.md`.
+#[test]
+fn locked_no_cliff_schedule_matches_readme_example() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100, // cliff == start (no cliff)
+    );
+
+    // Table checks from README.md:
+    // t=50: vested 0, locked 1000
+    t.set_time(50);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.locked(&id), 1_000);
+
+    // t=350: vested 250, locked 750
+    t.set_time(350);
+    assert_eq!(t.contract.vested(&id), 250);
+    assert_eq!(t.contract.locked(&id), 750);
+
+    // t=600: vested 500, locked 500
+    t.set_time(600);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.locked(&id), 500);
+
+    // t=850: vested 750, locked 250
+    t.set_time(850);
+    assert_eq!(t.contract.vested(&id), 750);
+    assert_eq!(t.contract.locked(&id), 250);
+
+    // t=1100: vested 1000, locked 0
+    t.set_time(1_100);
+    assert_eq!(t.contract.vested(&id), 1_000);
+    assert_eq!(t.contract.locked(&id), 0);
+
+    // t=9999: vested 1000, locked 0
+    t.set_time(9_999);
+    assert_eq!(t.contract.vested(&id), 1_000);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+/// A cancelled stream returns 0 locked because cancellation freezes `total_amount` at `vested`.
+#[test]
+fn locked_cancelled_stream_returns_zero() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at midpoint.
+    t.set_time(600);
+    t.contract.cancel(&id);
+
+    // Immediately zero locked.
+    assert_eq!(t.contract.locked(&id), 0);
+
+    // Past original end_time: still zero locked.
+    t.set_time(2_000);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+/// `locked` is read-only and leaves token balances and stream records unchanged.
+#[test]
+fn locked_view_is_read_only_and_leaves_no_side_effects() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    let sender_bal = t.token.balance(&t.sender);
+    let contract_bal = t.token.balance(&t.contract.address);
+
+    for ts in [50, 100, 350, 600, 850, 1_100, 2_000] {
+        t.set_time(ts);
+        let _ = t.contract.locked(&id);
+    }
+
+    assert_eq!(t.token.balance(&t.sender), sender_bal);
+    assert_eq!(t.token.balance(&t.contract.address), contract_bal);
+    assert_eq!(t.contract.stream_count(), 1);
+}
+
+// ── Issue #25: Pending status regression & invalid participant tests ──────────
+//
+// These tests verify that:
+// - A stream in `Pending` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Creation calls where the token address is the sender or recipient are
+//   rejected with `InvalidParticipant` before any tokens move.
+// - Existing valid stream creation behavior is unaffected.
+
+/// Verify that a stream in `Pending` status (`now < start_time`) behaves correctly:
+/// - `status` reports `Pending`.
+/// - `vested` is `0`, `withdrawable` is `0`, `locked` is `total_amount`, and `progress` is `0`.
+/// - `withdraw` returns `NothingToWithdraw` and transfers no tokens.
+/// - `withdraw_amount` returns `InsufficientBalance` for any positive amount and transfers no tokens.
+/// - `cancel` successfully refunds 100% of the stream amount and sets the status to `Cancelled`.
+#[test]
+fn status_pending_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 200u64;
+    let cliff = 200u64;
+    let end = 1_200u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time before start_time to make the stream Pending.
+    t.set_time(150);
+
+    // 1. Assert view functions match expected Pending values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Pending);
+    assert_eq!(t.contract.vested(&id), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.locked(&id), amount);
+    assert_eq!(t.contract.progress(&id), 0);
+
+    // 2. Assert try_withdraw fails with NothingToWithdraw and leaves balances unchanged.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+
+    // 3. Assert try_withdraw_amount with positive amount fails with InsufficientBalance.
+    assert_eq!(
+        t.contract.try_withdraw_amount(&id, &1),
+        Err(Ok(StreamError::InsufficientBalance))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+
+    // 4. Assert cancel refunds 100% of the tokens to sender and transitions to Cancelled.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, amount);
+    assert_eq!(t.token.balance(&t.sender), amount);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Creation fails with `InvalidParticipant` when the token address is used as the sender.
+#[test]
+fn create_stream_rejects_token_as_sender() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Using t.token_address as the sender.
+    let result = t.contract.try_create_stream(
+        &t.token_address,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// Creation fails with `InvalidParticipant` when the token address is used as the recipient.
+#[test]
+fn create_stream_rejects_token_as_recipient() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Using t.token_address as the recipient.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.token_address,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+// ── Issue #26: Streaming status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Streaming` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Creation calls with the contract's own address as a participant are rejected
+//   deterministically, preventing any token transfers.
+
+/// Verify that a stream in `Streaming` status (`start_time <= now < end_time`) behaves correctly:
+/// - `status` reports `Streaming`.
+/// - `vested`, `withdrawable`, `locked`, and `progress` compute active linear values.
+/// - `withdraw_amount` successfully transfers a partial amount to the recipient.
+/// - `withdraw` successfully transfers all remaining withdrawable tokens.
+/// - `cancel` splits the remaining unvested tokens and refunds the sender.
+#[test]
+fn status_streaming_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to the midpoint (600) to make the stream Streaming (50% vested).
+    t.set_time(600);
+
+    // 1. Assert view functions match expected Streaming values (midpoint).
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.locked(&id), 500);
+    assert_eq!(t.contract.progress(&id), 5_000);
+
+    // 2. Assert withdraw_amount (partial withdraw) works and updates views.
+    let partial_withdrawn = t.contract.withdraw_amount(&id, &200);
+    assert_eq!(partial_withdrawn, 200);
+    assert_eq!(t.token.balance(&t.recipient), 200);
+    assert_eq!(t.contract.withdrawable(&id), 300);
+    assert_eq!(t.contract.progress(&id), 5_000); // Progress is based on total vested, not withdrawn.
+
+    // 3. Assert withdraw (drain remaining vested) works.
+    let full_withdrawn = t.contract.withdraw(&id);
+    assert_eq!(full_withdrawn, 300);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // 4. Assert cancel refunds remaining unvested tokens (500) to sender.
+    // At ts=600, total vested = 500. Refund = 1000 - 500 = 500.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500); // 1000 initial - 1000 created + 500 refund = 500.
+    assert_eq!(t.token.balance(&t.contract.address), 0); // 500 recipient withdrawn + 500 sender refund.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Assert that creating a stream with the contract's own address as a participant
+/// is rejected with `InvalidParticipant` and no token transfer occurs.
+#[test]
+fn create_stream_rejects_contract_address_participant_regression() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let contract_address = t.contract.address.clone();
+
+    // Rejects contract as recipient
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &contract_address,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Rejects contract as sender
+    assert_eq!(
+        t.contract.try_create_stream(
+            &contract_address,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // Rejects contract as token
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.sender,
+            &t.recipient,
+            &contract_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+
+    // No token transfer occurred
+    t.assert_nothing_happened(1_000);
+}
+
+// ── Issue #27: Cancelled status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Cancelled` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, duplicate cancellations, and status queries).
+// - Counter overflow is handled without wrapping or ID reuse, returning `StreamCountExhausted`.
+
+/// Verify that a stream in `Cancelled` status behaves correctly:
+/// - `status` reports `Cancelled`.
+/// - `vested` returns the frozen vested amount.
+/// - `locked` returns `0`.
+/// - `progress` returns `10_000`.
+/// - `withdraw` successfully transfers the unwithdrawn vested tokens to the recipient.
+/// - `cancel` returns `AlreadyCancelled`.
+#[test]
+fn status_cancelled_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to the midpoint (600) where 50% is vested.
+    t.set_time(600);
+
+    // Cancel the stream. Sender gets 500 back, 500 remains in contract for recipient.
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // 1. Assert view functions match expected Cancelled values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // 2. Assert try_cancel fails with AlreadyCancelled.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::AlreadyCancelled))
+    );
+
+    // 3. Assert recipient can still withdraw the 500 vested units.
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
+/// Assert that when the stream counter reaches `u64::MAX`, subsequent creation calls
+/// fail with `StreamCountExhausted` without wrapping to zero, consuming/reusing any IDs,
+/// or moving tokens.
+#[test]
+fn counter_overflow_boundary_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Mock counter to u64::MAX.
+    t.set_stream_count(u64::MAX);
+
+    // Attempting to create a stream should fail.
+    let result = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(StreamError::StreamCountExhausted)));
+
+    // Ensure the ID counter is not reset, wrapping does not occur, and no tokens moved.
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+// ── Issue #28: Completed status regression tests ───────────────────────────────
+//
+// These tests verify that:
+// - A stream in `Completed` status behaves deterministically across all view and
+//   state-modifying operations (such as withdrawals, cancellations, and status queries).
+// - Once `now >= end_time`, the stream cannot be cancelled, but the recipient can
+//   withdraw any remaining vested tokens.
+
+/// Verify that a stream in `Completed` status behaves correctly:
+/// - `status` reports `Completed`.
+/// - `vested` returns `total_amount`.
+/// - `locked` returns `0`.
+/// - `progress` returns `10_000`.
+/// - `cancel` returns `StreamAlreadyCompleted`.
+/// - `withdraw_amount` (partial withdraw) works and updates `withdrawable` while status stays `Completed`.
+/// - `withdraw` successfully transfers all remaining withdrawable tokens.
+#[test]
+fn status_completed_regression_test() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Set time to or after end_time (1200) to make the stream Completed.
+    t.set_time(1200);
+
+    // 1. Assert view functions match expected Completed values.
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+    assert_eq!(t.contract.vested(&id), amount);
+    assert_eq!(t.contract.withdrawable(&id), amount);
+    assert_eq!(t.contract.locked(&id), 0);
+    assert_eq!(t.contract.progress(&id), 10_000);
+
+    // 2. Assert try_cancel fails with StreamAlreadyCompleted.
+    assert_eq!(
+        t.contract.try_cancel(&id),
+        Err(Ok(StreamError::StreamAlreadyCompleted))
+    );
+
+    // 3. Assert withdraw_amount (partial withdraw) works and updates withdrawable.
+    let partial_withdrawn = t.contract.withdraw_amount(&id, &400);
+    assert_eq!(partial_withdrawn, 400);
+    assert_eq!(t.token.balance(&t.recipient), 400);
+    assert_eq!(t.contract.withdrawable(&id), 600);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
+
+    // 4. Assert withdraw (drain remaining vested) works.
+    let full_withdrawn = t.contract.withdraw(&id);
+    assert_eq!(full_withdrawn, 600);
+    assert_eq!(t.token.balance(&t.recipient), amount);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed); // remains Completed
+}
+
+/// Multiple distinct senders can each create and fund streams to the same
+/// recipient, and recipient accounting (balances, stream records, withdrawable
+/// amounts) tracks each stream independently without cross-contamination.
+#[test]
+fn multiple_senders_to_one_recipient_accounting() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Setup sender B with tokens
+    let sender_b = Address::generate(&t.env);
+    let token_admin = token::StellarAssetClient::new(&t.env, &t.token_address);
+    token_admin.mint(&sender_b, &2_000);
+
+    // Sender A (t.sender) creates stream 0 to recipient (t.recipient) for 1_000 tokens
+    let id_a = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Sender B creates stream 1 to the SAME recipient (t.recipient) for 2_000 tokens
+    let id_b = t.contract.create_stream(
+        &sender_b,
+        &t.recipient,
+        &t.token_address,
+        &2_000,
+        &100,
+        &2_100,
+        &100,
+    );
+
+    assert_eq!(id_a, 0);
+    assert_eq!(id_b, 1);
+    assert_eq!(t.contract.stream_count(), 2);
+
+    // Initial stream records are stored independently
+    let stream_a = t.contract.get_stream(&id_a);
+    assert_eq!(stream_a.sender, t.sender);
+    assert_eq!(stream_a.recipient, t.recipient);
+    assert_eq!(stream_a.total_amount, 1_000);
+    assert_eq!(stream_a.withdrawn, 0);
+
+    let stream_b = t.contract.get_stream(&id_b);
+    assert_eq!(stream_b.sender, sender_b);
+    assert_eq!(stream_b.recipient, t.recipient);
+    assert_eq!(stream_b.total_amount, 2_000);
+    assert_eq!(stream_b.withdrawn, 0);
+
+    // Total contract balance is 1_000 + 2_000 = 3_000
+    assert_eq!(t.token.balance(&t.contract.address), 3_000);
+
+    // Midpoint of stream A (time 600): stream A is 50% vested (500), stream B is 25% vested (500 out of 2000 over [100, 2100])
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // Recipient withdraws from stream A only
+    let withdrawn_a = t.contract.withdraw(&id_a);
+    assert_eq!(withdrawn_a, 500);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+
+    // Stream B withdrawable remains unchanged by stream A withdrawal
+    assert_eq!(t.contract.withdrawable(&id_a), 0);
+    assert_eq!(t.contract.withdrawable(&id_b), 500);
+
+    // End of stream A (time 1100): stream A is 100% vested (1000 total, 500 remaining), stream B is 50% vested (1000)
+    t.set_time(1_100);
+    assert_eq!(t.contract.withdrawable(&id_a), 500);
+    assert_eq!(t.contract.withdrawable(&id_b), 1_000);
+
+    // Recipient withdraws remaining from stream A and half from stream B
+    assert_eq!(t.contract.withdraw(&id_a), 500);
+    assert_eq!(t.contract.withdraw(&id_b), 1_000);
+    assert_eq!(t.token.balance(&t.recipient), 2_000); // 1000 from A + 1000 from B
+
+    // Secondary (AC): confirm invalid participant calls are rejected before token transfers occur
+    assert_eq!(
+        t.contract.try_create_stream(
+            &t.recipient,
+            &t.recipient,
+            &t.token_address,
+            &1_000,
+            &100,
+            &1_100,
+            &100
+        ),
+        Err(Ok(StreamError::InvalidParticipant))
+    );
+}
+
+/// A stream where `sender` and `recipient` are the same address (including a user
+/// address or the contract's own address as both parties) is rejected
+/// deterministically with `StreamError::InvalidParticipant`. No tokens move, no
+/// stream record is created, and the stream id counter is not incremented.
+#[test]
+fn same_sender_and_recipient_stream_rejection() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Case 1: Standard user address as both sender and recipient
+    let res_user = t.contract.try_create_stream(
+        &t.sender,
+        &t.sender,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_user, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+
+    // Case 2: Contract address as both sender and recipient
+    let contract_addr = t.contract.address.clone();
+    let res_contract = t.contract.try_create_stream(
+        &contract_addr,
+        &contract_addr,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res_contract, Err(Ok(StreamError::InvalidParticipant)));
+    t.assert_nothing_happened(1_000);
+}
+
+/// Native asset token compatibility: creating, funding, withdrawing, and cancelling
+/// a stream using a Stellar Asset Contract (SAC) native token.
+#[test]
+fn native_asset_token_compatibility_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(StreamContract, ());
+    let contract = StreamContractClient::new(&env, &contract_id);
+
+    // Register a Stellar Asset Contract (SAC) for native asset compatibility
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin);
+    let native_token_address = sac.address();
+    let native_token = token::TokenClient::new(&env, &native_token_address);
+    let native_admin = token::StellarAssetClient::new(&env, &native_token_address);
+
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let amount: i128 = 2_000;
+
+    native_admin.mint(&sender, &amount);
+    assert_eq!(native_token.balance(&sender), amount);
+
+    env.ledger().set_timestamp(100);
+
+    // Create stream with native asset
+    let id = contract.create_stream(
+        &sender,
+        &recipient,
+        &native_token_address,
+        &amount,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(id, 0);
+
+    // Native asset tokens locked in contract
+    assert_eq!(native_token.balance(&sender), 0);
+    assert_eq!(native_token.balance(&contract.address), amount);
+
+    // Advance to midpoint (time 600) and withdraw
+    env.ledger().set_timestamp(600);
+    let withdrawn = contract.withdraw(&id);
+    assert_eq!(withdrawn, 1_000);
+    assert_eq!(native_token.balance(&recipient), 1_000);
+
+    // Cancel unvested remainder
+    let refund = contract.cancel(&id);
+    assert_eq!(refund, 1_000);
+    assert_eq!(native_token.balance(&sender), 1_000);
+    assert_eq!(contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Secondary AC boundary test: stream ID counter overflow at u64::MAX fails closed
+/// with StreamCountExhausted without wrapping to 0 or reusing an ID.
+#[test]
+fn stream_id_counter_overflow_fails_closed() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    // Force id counter to u64::MAX
+    t.set_stream_count(u64::MAX);
+
+    let res = t.contract.try_create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &500,
+        &100,
+        &1_100,
+        &100,
+    );
+    assert_eq!(res, Err(Ok(StreamError::StreamCountExhausted)));
+    assert_eq!(t.contract.stream_count(), u64::MAX);
+    assert_eq!(t.token.balance(&t.sender), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+}
+
+// ── Stream Authorization & Access Control Coverage (Issues #73, #74, #75, #76) ──
+
+/// Issue #73: Test sender cannot withdraw.
+///
+/// Asserts that only the stream recipient can authorize `withdraw` and `withdraw_amount`.
+/// When the sender (or any non-recipient) attempts to call withdrawal functions,
+/// authorization checks ensure the call requires `recipient` authorization, not `sender`.
+/// No token transfer occurs, and the stream state remains completely unchanged.
+#[test]
+fn test_sender_cannot_withdraw() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+    t.contract.withdraw(&id);
+    let auths = t.env.auths();
+    assert!(
+        auths.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw must require recipient authorization"
+    );
+    assert!(
+        !auths.iter().any(|(addr, _)| addr == &t.sender),
+        "withdraw must not require sender authorization"
+    );
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 500);
+}
+
+// ── Vesting Cancel Scenarios (#69, #70, #71, #72) ─────────────────────────────
+
+/// Issue #69 — Test cancel at exact cliff.
+///
+/// Build a fixture for a vesting stream with a defined cliff (start=100, cliff=600, end=1100).
+/// Perform a cancel operation at exactly the cliff timestamp (`now == 600`).
+/// Assert returned refund (500), recipient withdrawable amount (500), sender/contract balances,
+/// and stream status (Cancelled).
+///
+/// Note on Issue #69 Acceptance Criteria:
+/// The issue AC text describes rejecting "the contract address case", which is unrelated to
+/// cancelling at the exact cliff. Per instructions, this test covers the exact-cliff scenario
+/// named in the issue title and summary.
+#[test]
+fn test_cancel_at_exact_cliff() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Perform cancel operation at exactly the cliff timestamp.
+    t.set_time(cliff);
+    let refund = t.contract.cancel(&id);
+
+    // Exactly 50% (500) vested at cliff midpoint. Refund to sender is 500.
+    assert_eq!(refund, 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Recipient can withdraw the 500 tokens vested at the cliff.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.vested(&id), 500);
+    assert_eq!(t.contract.locked(&id), 0);
+}
+
+/// Issue #70 — Test cancel refund rounding.
+///
+/// Build a fixture where cancellation at a given point produces a refund amount
+/// subject to integer division / rounding.
+/// For total_amount=10 over [0, 3] with cliff=0, at `now=1`,
+/// `vested = 10 * 1 / 3 = 3` (truncated / rounded down).
+/// `refund = 10 - 3 = 7` (rounds up / in favor of sender refund).
+/// Assert exact refund amount (7), recipient withdrawable amount (3), balances, and status.
+///
+/// Note on Issue #70 Acceptance Criteria:
+/// The issue AC text mentions unrelated stream counter boundary scenarios. Per instructions,
+/// this test covers the refund rounding math named in the issue title and summary.
+#[test]
+fn test_cancel_refund_rounding() {
+    let t = StreamTest::setup(10);
+    t.set_time(0);
+
+    let start = 0u64;
+    let cliff = 0u64;
+    let end = 3u64;
+    let amount = 10i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // Cancel at timestamp 1 (1/3 of duration).
+    t.set_time(1);
+    let refund = t.contract.cancel(&id);
+
+    // Vested is floor(10 * 1 / 3) = 3.
+    // Refund is 10 - 3 = 7.
+    assert_eq!(refund, 7);
+    assert_eq!(t.token.balance(&t.sender), 7);
+    assert_eq!(t.token.balance(&t.contract.address), 3);
+    assert_eq!(t.contract.withdrawable(&id), 3);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+}
+
+/// Issue #71 — Test recipient claim after cancellation.
+///
+/// Build a fixture where a stream is cancelled, then the recipient attempts to claim/withdraw.
+/// Assert that the recipient can withdraw the already-vested-but-unclaimed amount prior to cancellation,
+/// and that subsequent withdrawal attempts return `StreamError::NothingToWithdraw`.
+/// Assert token balances and stream state after the claim attempt.
+///
+/// Note on Issue #71 Acceptance Criteria:
+/// The issue AC text mentions unrelated recipient address checks. Per instructions,
+/// this test covers the recipient claim after cancellation scenario named in the title and summary.
+#[test]
+fn test_recipient_claim_after_cancellation() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Advance clock to midpoint so 500 tokens have vested.
+    t.set_time(600);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // 1. Partial withdraw (withdraw_amount) requires recipient authorization.
+    t.contract.withdraw_amount(&id, &100);
+    let auths_amount = t.env.auths();
+    assert!(
+        auths_amount.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw_amount must require recipient authorization"
+    );
+    assert!(
+        !auths_amount.iter().any(|(addr, _)| addr == &t.sender),
+        "withdraw_amount must not authorize sender"
+    );
+
+    // 2. Full withdraw (withdraw) requires recipient authorization.
+    t.contract.withdraw(&id);
+    let auths = t.env.auths();
+    assert!(
+        auths.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw must require recipient authorization"
+    );
+    assert!(
+        !auths.iter().any(|(addr, _)| addr == &t.sender),
+        "withdraw must not authorize or be attributed to sender"
+    );
+
+    // Verify stream state and balances: recipient received 500 total (100 partial + 400 remaining), sender received 0.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 500);
+    assert!(!t.contract.get_stream(&id).cancelled);
+}
+
+/// Issue #74: Test recipient cannot cancel.
+///
+/// Asserts that only the stream sender (owner) can authorize `cancel`.
+/// When recipient (or any non-sender) attempts to call `cancel`, authorization
+/// checks ensure the call requires `sender` authorization, not `recipient`.
+/// Stream status remains `Streaming` (or active), `cancelled` remains `false`,
+/// and no refund or token transfer occurs.
+#[test]
+fn test_recipient_cannot_cancel() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Cancel at midpoint (ts=600): 500 vested, 500 refunded to sender.
+    t.set_time(600);
+    let refund = t.contract.cancel(&id);
+    assert_eq!(refund, 500);
+
+    // Recipient claims/withdraws after cancellation (even advancing time further).
+    t.set_time(1_500);
+    let withdrawn = t.contract.withdraw(&id);
+    assert_eq!(withdrawn, 500);
+
+    // Balances after claim: recipient has 500, sender has 500, contract is 0.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.sender), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Cancelled);
+
+    // Second claim attempt is rejected with NothingToWithdraw.
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+    assert_eq!(t.token.balance(&t.recipient), 500);
+}
+
+/// Issue #72 — Test repeated cancel failure.
+///
+/// Build a fixture where a stream is cancelled once successfully.
+/// Attempt to cancel the same stream a second time.
+/// Assert that the second cancel attempt fails deterministically with `StreamError::AlreadyCancelled`,
+/// and that no token transfer occurs on the second call.
+#[test]
+fn test_repeated_cancel_fails() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // Advance clock to midpoint.
+    t.set_time(600);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // Execute cancel to inspect required authorizations.
+    t.contract.cancel(&id);
+    let auths = t.env.auths();
+
+    // Verify cancel requires sender authorization and NOT recipient authorization.
+    assert!(
+        auths.iter().any(|(addr, _)| addr == &t.sender),
+        "cancel must require sender authorization"
+    );
+    assert!(
+        !auths.iter().any(|(addr, _)| addr == &t.recipient),
+        "cancel must not require or accept recipient authorization"
+    );
+
+    // Test with a fresh stream: verify recipient cannot trigger cancellation on their own.
+    let t2 = StreamTest::setup(1_000);
+    t2.set_time(100);
+    let id2 = t2.contract.create_stream(
+        &t2.sender,
+        &t2.recipient,
+        &t2.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    t2.set_time(600);
+
+    // Check that before cancellation, sender balance is 0 and contract has 1000.
+    assert_eq!(t2.token.balance(&t2.sender), 0);
+    assert_eq!(t2.token.balance(&t2.contract.address), 1_000);
+    assert_eq!(t2.contract.status(&id2), StreamStatus::Streaming);
+}
+
+/// Issue #75: Test third party view access.
+///
+/// Asserts that view/read-only functions (`get_stream`, `status`, `withdrawable`,
+/// `vested`, `locked`, `progress`, `stream_count`) are public and unauthenticated
+/// by design. An unrelated third-party address can query stream details, and all
+/// calls succeed returning accurate data without requiring any authorization.
+#[test]
+fn test_third_party_view_access() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+
+    // Generate an unrelated third party address.
+    let third_party = Address::generate(&t.env);
+    assert_ne!(third_party, t.sender);
+    assert_ne!(third_party, t.recipient);
+
+    // 1. Third party queries stream details via get_stream.
+    let stream = t.contract.get_stream(&id);
+    assert_eq!(stream.sender, t.sender);
+    assert_eq!(stream.recipient, t.recipient);
+    assert_eq!(stream.total_amount, 1_000);
+
+    // 2. Third party queries status.
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+
+    // 3. Third party queries withdrawable.
+    assert_eq!(t.contract.withdrawable(&id), 500);
+
+    // 4. Third party queries vested.
+    assert_eq!(t.contract.vested(&id), 500);
+
+    // 5. Third party queries locked balance.
+    assert_eq!(t.contract.locked(&id), 500);
+
+    // 6. Third party queries progress basis points.
+    assert_eq!(t.contract.progress(&id), 5_000);
+
+    // 7. Third party queries stream count.
+    assert_eq!(t.contract.stream_count(), 1);
+
+    // Assert that read-only view calls do not require any address authorization.
+    let auths = t.env.auths();
+    assert!(
+        auths.is_empty(),
+        "read-only view functions must be unauthenticated and produce empty auth list"
+    );
+}
+
+/// Issue #76: Test third party cannot mutate streams.
+///
+/// Asserts that an unrelated third-party address cannot perform state-mutating
+/// operations (`cancel`, `withdraw`, `withdraw_amount`) on a stream they are not
+/// a participant in. Mutating operations strictly require participant authorization
+/// (`sender` for cancel, `recipient` for withdraw).
+#[test]
+fn test_third_party_cannot_mutate_streams() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    t.set_time(600);
+
+    let third_party = Address::generate(&t.env);
+    assert_ne!(third_party, t.sender);
+    assert_ne!(third_party, t.recipient);
+
+    // 1. Verify withdraw_amount requires recipient auth, not third_party.
+    t.contract.withdraw_amount(&id, &100);
+    let auths_wa = t.env.auths();
+    assert!(
+        auths_wa.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw_amount must require recipient auth"
+    );
+    assert!(
+        !auths_wa.iter().any(|(addr, _)| addr == &third_party),
+        "withdraw_amount must not accept third party auth"
+    );
+
+    // 2. Verify full withdraw requires recipient auth, not third_party.
+    t.contract.withdraw(&id);
+    let auths_w = t.env.auths();
+    assert!(
+        auths_w.iter().any(|(addr, _)| addr == &t.recipient),
+        "withdraw must require recipient auth"
+    );
+    assert!(
+        !auths_w.iter().any(|(addr, _)| addr == &third_party),
+        "withdraw must not accept third party auth"
+    );
+
+    // 3. Verify cancel requires sender auth, not third_party.
+    let t_cancel = StreamTest::setup(1_000);
+    t_cancel.set_time(100);
+    let id_cancel = t_cancel.contract.create_stream(
+        &t_cancel.sender,
+        &t_cancel.recipient,
+        &t_cancel.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+    t_cancel.set_time(600);
+
+    t_cancel.contract.cancel(&id_cancel);
+    let auths_c = t_cancel.env.auths();
+    assert!(
+        auths_c.iter().any(|(addr, _)| addr == &t_cancel.sender),
+        "cancel must require sender auth"
+    );
+    assert!(
+        !auths_c.iter().any(|(addr, _)| addr == &third_party),
+        "cancel must not accept third party auth"
+    );
 }

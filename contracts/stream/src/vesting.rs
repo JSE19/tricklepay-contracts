@@ -165,3 +165,80 @@ mod tests {
         assert_eq!(withdrawable_amount(300, 300), 0);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn valid_stream_params()(
+            total_amount in 0i128..=i64::MAX as i128,
+            start_time in 0u64..=u64::MAX / 2,
+            duration in 1u64..=u64::MAX / 2,
+            cliff_offset in 0u64..=u64::MAX / 2,
+        ) -> (i128, u64, u64, u64) {
+            let end_time = start_time + duration;
+            let cliff_time = start_time + cliff_offset.min(duration);
+            (total_amount, start_time, end_time, cliff_time)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn vested_between_zero_and_total(
+            (total, start, end, cliff) in valid_stream_params(),
+            now in any::<u64>(),
+        ) {
+            let v = vested_amount(total, start, end, cliff, now);
+            prop_assert!(v >= 0, "vested must be >= 0");
+            prop_assert!(v <= total, "vested must be <= total");
+        }
+
+        #[test]
+        fn vested_at_end_equals_total(
+            (total, start, end, cliff) in valid_stream_params(),
+        ) {
+            prop_assert_eq!(vested_amount(total, start, end, cliff, end), total);
+        }
+
+        #[test]
+        fn vested_is_monotonic_in_now(
+            (total, start, end, cliff) in valid_stream_params(),
+            now_a in any::<u64>(),
+            now_b in any::<u64>(),
+        ) {
+            let (a, b) = if now_a <= now_b {
+                (now_a, now_b)
+            } else {
+                (now_b, now_a)
+            };
+            let va = vested_amount(total, start, end, cliff, a);
+            let vb = vested_amount(total, start, end, cliff, b);
+            prop_assert!(va <= vb, "vested must be monotonic: va={} vb={} a={} b={}", va, vb, a, b);
+        }
+
+        #[test]
+        fn withdrawable_between_zero_and_vested(
+            vested in 0i128..=i64::MAX as i128,
+            withdrawn in 0i128..=i64::MAX as i128,
+        ) {
+            let w = withdrawable_amount(vested, withdrawn);
+            prop_assert!(w >= 0, "withdrawable must be >= 0");
+            prop_assert!(w <= vested, "withdrawable must be <= vested");
+        }
+
+        #[test]
+        fn withdrawable_equals_vested_minus_withdrawn_when_withdrawn_le_vested(
+            vested in 0i128..=i64::MAX as i128,
+            withdrawn in 0i128..=i64::MAX as i128,
+        ) {
+            let (v, wd) = if withdrawn <= vested {
+                (vested, withdrawn)
+            } else {
+                (withdrawn, vested)
+            };
+            prop_assert_eq!(withdrawable_amount(v, wd), v - wd);
+        }
+    }
+}

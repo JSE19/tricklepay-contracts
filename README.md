@@ -63,25 +63,25 @@ Both examples stream **1000 units from `start_time = 100` to `end_time = 1100`**
 — the reference stream the vesting tests use. Every row below is asserted in
 [`vesting.rs`](contracts/stream/src/vesting.rs).
 
-Without a cliff, `cliff_time == start_time == 100`:
+Without a cliff, `cliff_time == start_time == 100` (no cliff):
 
-| Time | Vested | |
-| --- | --- | --- |
-| 50 | 0 | before the start, nothing has vested |
-| 350 | 250 | a quarter of the window has elapsed |
-| 600 | 500 | the midpoint |
-| 850 | 750 | three quarters |
-| 1100 | 1000 | the end: fully vested |
-| 9999 | 1000 | past the end, still capped at the total |
+| Time | Vested | Locked | Description |
+| --- | --- | --- | --- |
+| 50 | 0 | 1000 | before the start, nothing has vested; entire amount is locked |
+| 350 | 250 | 750 | a quarter of the window has elapsed |
+| 600 | 500 | 500 | the midpoint |
+| 850 | 750 | 250 | three quarters |
+| 1100 | 1000 | 0 | the end: fully vested; zero locked |
+| 9999 | 1000 | 0 | past the end, still capped at the total |
 
 With a cliff at the midpoint, `cliff_time == 600`:
 
-| Time | Vested | |
-| --- | --- | --- |
-| 300 | 0 | past the start, but the cliff has not been reached |
-| 600 | 500 | the cliff releases everything accrued since the start, at once |
-| 850 | 750 | vesting continues linearly from the cliff onward |
-| 1100 | 1000 | the end: fully vested |
+| Time | Vested | Locked | Description |
+| --- | --- | --- | --- |
+| 300 | 0 | 1000 | past the start, but the cliff has not been reached; all 1000 remains locked |
+| 600 | 500 | 500 | the cliff releases everything accrued since the start, unlocking 500 |
+| 850 | 750 | 250 | vesting continues linearly from the cliff onward |
+| 1100 | 1000 | 0 | the end: fully vested |
 
 The two schedules agree everywhere from the cliff onward. A cliff does not
 change the rate or the total, it only withholds the earlier portion and then
@@ -172,6 +172,21 @@ The first four calls move tokens and require authorization from the caller
 named above. The rest are read-only views computed from the stream record and
 the current ledger time; those that take an id return `StreamNotFound` when no
 stream has it.
+
+### Token allowance requirements
+
+When calling `create_stream`, the full `total_amount` of tokens is pulled immediately from the `sender` into the stream contract address via `TokenClient::transfer(&sender, &contract_address, &total_amount)` (see [`contract.rs`](contracts/stream/src/contract.rs#L133-L137)).
+
+- **Allowance Expectation:** The contract expects the `sender` to have a sufficient token balance and to have authorized the token transfer. On Soroban (SEP-41 / Stellar Asset Contract standard), calling `create_stream` invokes `sender.require_auth()`. In client integrations, the `sender` must either include the token transfer in their invocation authorization or grant an allowance to the stream contract equal to or exceeding `total_amount`.
+- **How it's checked:** The allowance and balance check occurs in step 5 of `create_stream` after all validation checks (authorization, participants, amount, schedule, capacity) pass. If `sender` lacks sufficient balance or token allowance/authorization, the token transfer panics before any stream state is created or stored.
+- **Worked example:**
+  1. A sender holds **1,000 stroops** of token `T`.
+  2. The sender approves/authorizes the stream contract to transfer **1,000 stroops** of token `T`.
+  3. The sender invokes `create_stream(sender, recipient, token_T, 1000, 100, 1100, 100)` (where `cliff_time == start_time == 100` represents the no-cliff vesting case).
+  4. Step 5 executes `TokenClient::new(&env, &token_T).transfer(&sender, &contract_address, &1000)`.
+  5. The contract balance increases by 1,000 stroops, the sender balance decreases by 1,000 stroops, and stream ID `0` is initialized with linear vesting math `vested = total_amount * elapsed / duration` matching the no-cliff example schedule in [`vesting.rs`](contracts/stream/src/vesting.rs#L108-L116).
+
+Verification and test implementations can be reviewed in [`test.rs`](contracts/stream/src/test.rs#L128-L157).
 
 ### Error codes
 
