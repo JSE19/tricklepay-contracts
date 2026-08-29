@@ -541,6 +541,46 @@ fn test_withdraw_at_exact_start() {
     assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
 }
 
+/// Issue #58 — Test withdrawal after full vesting.
+///
+/// Build a fixture for a vesting stream (start=100, end=1100, no cliff) and
+/// advance the clock well past `end_time`. The whole amount is vested, so a
+/// single `withdraw` must return the full 1 000, drain the contract, and mark
+/// the stored `withdrawn` field as fully taken.
+#[test]
+fn test_withdraw_after_full_vesting() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &start,
+    );
+
+    // Long after the window closes the stream is fully vested.
+    t.set_time(end + 1_000);
+    assert_eq!(t.contract.status(&id), StreamStatus::Completed);
+    assert_eq!(t.contract.withdrawable(&id), amount);
+
+    // A single withdraw releases the entire balance.
+    assert_eq!(t.contract.withdraw(&id), amount);
+    assert_eq!(t.token.balance(&t.recipient), amount);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, amount);
+
+    // Nothing remains to withdraw.
+    assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
 #[test]
 fn cancel_refunds_unvested_and_preserves_vested() {
     let t = StreamTest::setup(1_000);
