@@ -383,6 +383,49 @@ fn withdraw_amount_available_plus_one_receives_insufficient_balance() {
     assert_eq!(t.contract.get_stream(&id).withdrawn, 0);
 }
 
+/// Issue #57 — Test partial withdrawals across multiple calls.
+///
+/// Build a fixture for a vesting stream (start=100, end=1100, no cliff) and
+/// draw `withdraw_amount` three times at increasing points in time. Each call
+/// must return the exact partial amount, move only that amount to the
+/// recipient, and accumulate correctly in the stored `withdrawn` field.
+#[test]
+fn test_partial_withdrawals_across_multiple_calls() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &1_000,
+        &100,
+        &1_100,
+        &100,
+    );
+
+    // First partial draw midway through: 500 vested, take 200.
+    t.set_time(600);
+    assert_eq!(t.contract.withdraw_amount(&id, &200), 200);
+    assert_eq!(t.token.balance(&t.recipient), 200);
+    assert_eq!(t.token.balance(&t.contract.address), 800);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 200);
+
+    // Second partial draw later: 750 vested, take 300 more.
+    t.set_time(850);
+    assert_eq!(t.contract.withdraw_amount(&id, &300), 300);
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 500);
+
+    // Third and final draw at the end: the remaining 500 vests and is taken.
+    t.set_time(1_100);
+    assert_eq!(t.contract.withdraw_amount(&id, &500), 500);
+    assert_eq!(t.token.balance(&t.recipient), 1_000);
+    assert_eq!(t.token.balance(&t.contract.address), 0);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 1_000);
+}
+
 #[test]
 fn cliff_blocks_withdrawal_until_reached() {
     let t = StreamTest::setup(1_000);
