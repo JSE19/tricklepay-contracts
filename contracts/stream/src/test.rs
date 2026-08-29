@@ -413,6 +413,47 @@ fn cliff_blocks_withdrawal_until_reached() {
     assert_eq!(t.token.balance(&t.recipient), 500);
 }
 
+/// Issue #59 — Test withdrawal at exact cliff.
+///
+/// Build a fixture for a vesting stream with a cliff at the midpoint
+/// (start=100, cliff=600, end=1100). Move the clock to exactly `cliff_time`
+/// and withdraw. Everything accrued since the start unlocks in one step, so
+/// the call must return 500, move it to the recipient, and leave the other
+/// 500 still locked in the contract.
+#[test]
+fn test_withdraw_at_exact_cliff() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 100u64;
+    let cliff = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &cliff,
+    );
+
+    // At exactly the cliff, the accrued half unlocks all at once.
+    t.set_time(cliff);
+    assert_eq!(t.contract.withdrawable(&id), 500);
+    assert_eq!(t.contract.withdraw(&id), 500);
+
+    // The recipient received the vested half; the rest is still locked.
+    assert_eq!(t.token.balance(&t.recipient), 500);
+    assert_eq!(t.token.balance(&t.contract.address), 500);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 500);
+
+    // Nothing further vests until the clock advances again.
+    assert_eq!(t.contract.withdrawable(&id), 0);
+}
+
 #[test]
 fn cancel_refunds_unvested_and_preserves_vested() {
     let t = StreamTest::setup(1_000);
