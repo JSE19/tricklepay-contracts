@@ -497,6 +497,50 @@ fn test_withdraw_at_exact_cliff() {
     assert_eq!(t.contract.withdrawable(&id), 0);
 }
 
+/// Issue #60 — Test withdrawal at exact start.
+///
+/// Build a fixture for a vesting stream (start=600, end=1100, no cliff) and
+/// move the clock to exactly `start_time`. Zero time has elapsed at the exact
+/// start — the first token only vests one second later — so `withdraw` must be
+/// rejected with `NothingToWithdraw` and no tokens may move.
+#[test]
+fn test_withdraw_at_exact_start() {
+    let t = StreamTest::setup(1_000);
+    t.set_time(100);
+
+    let start = 600u64;
+    let end = 1_100u64;
+    let amount = 1_000i128;
+
+    let id = t.contract.create_stream(
+        &t.sender,
+        &t.recipient,
+        &t.token_address,
+        &amount,
+        &start,
+        &end,
+        &start,
+    );
+
+    // One second before the start nothing is available either.
+    t.set_time(start - 1);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+
+    // At exactly start_time zero time has elapsed, so nothing has vested.
+    t.set_time(start);
+    assert_eq!(t.contract.withdrawable(&id), 0);
+    assert_eq!(
+        t.contract.try_withdraw(&id),
+        Err(Ok(StreamError::NothingToWithdraw))
+    );
+
+    // The rejection moved nothing and left the stream untouched.
+    assert_eq!(t.token.balance(&t.recipient), 0);
+    assert_eq!(t.token.balance(&t.contract.address), amount);
+    assert_eq!(t.contract.get_stream(&id).withdrawn, 0);
+    assert_eq!(t.contract.status(&id), StreamStatus::Streaming);
+}
+
 #[test]
 fn cancel_refunds_unvested_and_preserves_vested() {
     let t = StreamTest::setup(1_000);
